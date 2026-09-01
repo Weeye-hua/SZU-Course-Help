@@ -10,7 +10,7 @@
 
 核心约束：
     - 保持 choose_course.submit_course_selection() 的学校请求字段兼容
-    - 不修改学校返回结果的判断关键词
+    - 学校提交响应只作为候选结果，最终以已选课程中的教学班 ID 为准
     - 保留 PENDING → ENROLLING → SUCCESS/FAILED 的状态语义
 """
 
@@ -90,6 +90,16 @@ class GrabOutcome(StrEnum):
     PAUSED = "paused"
 
 
+class EnrollmentConfirmation(StrEnum):
+    """Result of checking the authoritative selected-course list."""
+
+    CONFIRMED = "confirmed"
+    ABSENT = "absent"
+    SESSION_EXPIRED = "session_expired"
+    UNAVAILABLE = "unavailable"
+    INTERRUPTED = "interrupted"
+
+
 # ====================================================================
 # 学校返回结果分类关键词
 # ====================================================================
@@ -135,13 +145,17 @@ RETRYABLE_ERROR_KEYWORDS = (
     "操作频繁",
     "网络繁忙",
 )
-# 终态失败：重试也不会成功，直接标记 FAILED 并移出活动集
-TERMINAL_ERROR_KEYWORDS = (
+# A duplicate response may mean the first request succeeded even when its reply
+# was lost. It is therefore a confirmation candidate, not a terminal failure.
+ALREADY_SELECTED_KEYWORDS = (
     "已经选过",
     "已选过",
     "已经选择",
     "重复选课",
     "已存在",
+)
+# 终态失败：重试也不会成功，直接标记 FAILED 并移出活动集
+TERMINAL_ERROR_KEYWORDS = (
     "时间冲突",
     "上课时间冲突",
     "冲突",
@@ -165,6 +179,9 @@ NETWORK_BACKOFF_BASE_MS = 500
 NETWORK_BACKOFF_CAP_MS = 30_000
 UNKNOWN_BACKOFF_STEP_MS = 200
 UNKNOWN_BACKOFF_CAP_MS = 2_000
+ENROLLMENT_CONFIRM_ATTEMPTS = 3
+ENROLLMENT_CONFIRM_RETRY_SECONDS = 0.5
+ENROLLMENT_CONFIRM_TIMEOUT = (3, 8)
 # 事件队列上限（仅保留最近的事件）
 MAX_EVENTS = 200
 
@@ -690,7 +707,8 @@ def _response_message(response) -> str:
 def _classify_response(response) -> str:
     """把学校返回结果归类为一个动作标签。
 
-    返回：success | retry | terminal | expired | window_closed | unknown
+    返回：success | already_selected | retry | terminal | expired |
+    window_closed | transient | unknown
     """
     text = getattr(response, "text", "") or ""
     message = _response_message(response)
@@ -708,6 +726,8 @@ def _classify_response(response) -> str:
         return "expired"
     if SUCCESS_KEYWORD in searchable:
         return "success"
+    if any(keyword in searchable for keyword in ALREADY_SELECTED_KEYWORDS):
+        return "already_selected"
     if any(keyword in searchable for keyword in CAPACITY_FULL_KEYWORDS):
         return "retry"
     if any(keyword in searchable for keyword in WINDOW_CLOSED_KEYWORDS):
@@ -717,6 +737,99 @@ def _classify_response(response) -> str:
     if any(keyword in searchable for keyword in TERMINAL_ERROR_KEYWORDS):
         return "terminal"
     return "unknown"
+
+
+def _confirm_course_enrolled(course: EnrollmentCourse) -> EnrollmentConfirmation:
+    """Confirm one enrollment by exact class ID in the school's selected list."""
+    latest_snapshot_valid = False
+    last_error = ""
+
+    for attempt in range(1, ENROLLMENT_CONFIRM_ATTEMPTS + 1):
+        if is_stop_requested() or get_enroll_task_state()["paused"]:
+            return EnrollmentConfirmation.INTERRUPTED
+        _update_course_progress(
+            course.id,
+            message=(
+                f"学校已受理，正在核对学校已选课程（{attempt}/{ENROLLMENT_CONFIRM_ATTEMPTS}）"
+            ),
+        )
+        try:
+            rows = choose_course.query_enrolled_courses(
+                config.combined_cookie,
+                config.token,
+                timeout=ENROLLMENT_CONFIRM_TIMEOUT,
+            )
+            selected_ids = choose_course.enrolled_teaching_class_ids(rows)
+            latest_snapshot_valid = True
+            if course.id in selected_ids:
+                return EnrollmentConfirmation.CONFIRMED
+        except choose_course.SchoolSessionExpiredError:
+            return EnrollmentConfirmation.SESSION_EXPIRED
+        except (requests.RequestException, ConnectionError, TypeError, ValueError) as exc:
+            latest_snapshot_valid = False
+            last_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "Enrollment confirmation query failed for %s (%s/%s): %s",
+                course.name,
+                attempt,
+                ENROLLMENT_CONFIRM_ATTEMPTS,
+                last_error,
+            )
+
+        if attempt < ENROLLMENT_CONFIRM_ATTEMPTS and not _wait_between_requests(
+            ENROLLMENT_CONFIRM_RETRY_SECONDS
+        ):
+            return EnrollmentConfirmation.INTERRUPTED
+
+    if latest_snapshot_valid:
+        return EnrollmentConfirmation.ABSENT
+    logger.warning(
+        "Enrollment confirmation unavailable for %s after %s attempt(s): %s",
+        course.name,
+        ENROLLMENT_CONFIRM_ATTEMPTS,
+        last_error or "no valid selected-course snapshot",
+    )
+    return EnrollmentConfirmation.UNAVAILABLE
+
+
+def _record_business_failure(
+    course: EnrollmentCourse,
+    business_failures: dict[str, int],
+    message: str,
+) -> None:
+    """Record a retryable school rejection and apply configured mode limits."""
+    business_failures[course.id] += 1
+    _business_failure_counts[course.id] = business_failures[course.id]
+    _update_course_progress(
+        course.id,
+        failures=business_failures[course.id],
+        mode=get_enroll_task_state()["mode"],
+        message=message,
+    )
+    current_mode = get_enroll_task_state()["mode"]
+    failure_limit = _mode_failure_limit(current_mode)
+    if (
+        get_enroll_task_state()["running"]
+        and current_mode == "boost"
+        and failure_limit is not None
+        and business_failures[course.id] >= failure_limit
+    ):
+        set_enroll_mode("normal")
+        _add_event(
+            "warn",
+            f"{course.name} boost 业务失败达到 {failure_limit} 次，降为一般模式",
+        )
+    elif (
+        get_enroll_task_state()["running"]
+        and current_mode == "normal"
+        and failure_limit is not None
+        and business_failures[course.id] >= failure_limit
+    ):
+        set_enroll_mode("scan")
+        _add_event(
+            "warn",
+            f"{course.name} 一般模式业务失败达到 {failure_limit} 次，降为扫描模式",
+        )
 
 
 def _active_course_ids() -> set:
@@ -1013,53 +1126,74 @@ def grab_courses(courses: list) -> GrabOutcome:
                 if action != "unknown":
                     unknown_streak[course.id] = 0
 
-                if action == "success":
-                    cart_service.update_status(course.id, database.STATUS_SUCCESS)
-                    _update_course_progress(
-                        course.id,
-                        status=database.STATUS_SUCCESS,
-                        message="已抢到，已加入我的课程",
-                    )
-                    _add_event("success", f"{course.name} 已加入我的课程")
-                    active.remove(course)
+                if action in {"success", "already_selected"}:
+                    confirmation = _confirm_course_enrolled(course)
+                    if confirmation == EnrollmentConfirmation.CONFIRMED:
+                        if not cart_service.update_status(course.id, database.STATUS_SUCCESS):
+                            reason = (
+                                f"{course.name} 已由学校确认选中，但本地状态写入失败，"
+                                "任务已保护性暂停"
+                            )
+                            _update_course_progress(course.id, message=reason)
+                            pause_enroll_task(reason, source="local_state_error")
+                            return GrabOutcome.PAUSED
+                        _update_course_progress(
+                            course.id,
+                            status=database.STATUS_SUCCESS,
+                            message="已由学校已选课程列表确认",
+                        )
+                        _add_event(
+                            "success",
+                            f"{course.name} 已由学校已选课程列表确认选中",
+                        )
+                        active.remove(course)
+                    elif confirmation == EnrollmentConfirmation.SESSION_EXPIRED:
+                        _add_event("warn", "核对选课结果时检测到登录已过期，准备自动重新登录")
+                        return GrabOutcome.SESSION_EXPIRED
+                    elif confirmation == EnrollmentConfirmation.UNAVAILABLE:
+                        reason = (
+                            f"{course.name} 的提交结果暂时无法向学校已选课程列表核实，"
+                            "任务已保护性暂停；请稍后刷新“我的课程”并继续"
+                        )
+                        _update_course_progress(course.id, message=reason)
+                        pause_enroll_task(reason, source="confirmation_unavailable")
+                        return GrabOutcome.PAUSED
+                    elif confirmation == EnrollmentConfirmation.INTERRUPTED:
+                        return GrabOutcome.COMPLETED if is_stop_requested() else GrabOutcome.PAUSED
+                    else:
+                        reason = _response_message(response)[:80]
+                        _record_business_failure(
+                            course,
+                            business_failures,
+                            (
+                                "学校提示已受理，但已选课程列表尚未出现该教学班，继续尝试"
+                                f"：{reason}"
+                                if reason
+                                else "学校提示已受理，但已选课程列表尚未出现该教学班，继续尝试"
+                            ),
+                        )
+                        logger.warning(
+                            "School accepted enrollment for %s but class %s was absent "
+                            "from the selected-course list",
+                            course.name,
+                            course.id,
+                        )
+                        if not _wait_between_requests(
+                            _mode_interval_seconds(get_enroll_task_state()["mode"])
+                        ):
+                            return GrabOutcome.PAUSED
+                        continue
                 elif action == "retry":
                     reason = _response_message(response)
-                    business_failures[course.id] += 1
-                    _business_failure_counts[course.id] = business_failures[course.id]
-                    _update_course_progress(
-                        course.id,
-                        failures=business_failures[course.id],
-                        mode=get_enroll_task_state()["mode"],
-                        message=(
+                    _record_business_failure(
+                        course,
+                        business_failures,
+                        (
                             "课容量已满，继续尝试"
                             if any(keyword in reason for keyword in CAPACITY_FULL_KEYWORDS)
                             else f"学校暂时未受理，继续尝试：{reason[:80] or '请稍后再试'}"
                         ),
                     )
-                    current_mode = get_enroll_task_state()["mode"]
-                    failure_limit = _mode_failure_limit(current_mode)
-                    if (
-                        get_enroll_task_state()["running"]
-                        and current_mode == "boost"
-                        and failure_limit is not None
-                        and business_failures[course.id] >= failure_limit
-                    ):
-                        set_enroll_mode("normal")
-                        _add_event(
-                            "warn",
-                            f"{course.name} boost 业务失败达到 {failure_limit} 次，降为一般模式",
-                        )
-                    elif (
-                        get_enroll_task_state()["running"]
-                        and current_mode == "normal"
-                        and failure_limit is not None
-                        and business_failures[course.id] >= failure_limit
-                    ):
-                        set_enroll_mode("scan")
-                        _add_event(
-                            "warn",
-                            f"{course.name} 一般模式业务失败达到 {failure_limit} 次，降为扫描模式",
-                        )
                     if not _wait_between_requests(
                         _mode_interval_seconds(get_enroll_task_state()["mode"])
                     ):

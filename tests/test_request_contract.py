@@ -231,3 +231,48 @@ def test_selected_course_login_page_is_not_treated_as_empty(monkeypatch):
 
     with pytest.raises(choose_course.SchoolSessionExpiredError):
         choose_course.query_enrolled_courses("cookie", "token")
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"code": "2", "msg": "系统繁忙", "dataList": []}, "rejected"),
+        ({"code": "1", "msg": "查询成功"}, "no dataList"),
+        ({"code": "1", "dataList": {}}, "must be a list"),
+    ],
+)
+def test_selected_course_malformed_payload_is_not_treated_as_empty(monkeypatch, payload, error):
+    class SelectedResponse:
+        status_code = 200
+        text = json.dumps(payload, ensure_ascii=False)
+
+        def json(self):
+            return payload
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        choose_course,
+        "_school_request",
+        lambda *_args, **_kwargs: SelectedResponse(),
+    )
+
+    with pytest.raises(ValueError, match=error):
+        choose_course.query_enrolled_courses("cookie", "token")
+
+
+def test_selected_course_id_validation_is_exact_and_strict():
+    rows = [
+        {"teachingClassID": " class-a "},
+        {"teachingClassId": "class-b"},
+        {"teaching_class_id": "class-c"},
+    ]
+    assert choose_course.enrolled_teaching_class_ids(rows) == {
+        "class-a",
+        "class-b",
+        "class-c",
+    }
+
+    with pytest.raises(ValueError, match="has no teaching-class ID"):
+        choose_course.enrolled_teaching_class_ids([{"courseName": "同名课程"}])

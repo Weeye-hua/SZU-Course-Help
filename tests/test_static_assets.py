@@ -222,6 +222,7 @@ def test_course_filters_are_exclusion_filters_and_hide_empty_groups():
     assert ".filter((course) => courseHasVisibleClasses(course))" in script
     assert "appState.courses.filter((course) => courseHasVisibleClasses(course))" in script
     assert "当前筛选条件下没有可显示的课程" in script
+    assert "筛选后显示 ${visibleCount} 门" in script
     assert "当前筛选条件下没有符合条件的教学班" not in script
 
 

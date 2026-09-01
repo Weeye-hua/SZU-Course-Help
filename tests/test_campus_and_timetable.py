@@ -145,6 +145,11 @@ def test_cart_campus_survives_until_enrollment_submission(tmp_path, monkeypatch)
             or JsonResponse({"code": "1", "msg": "添加选课志愿成功"})
         ),
     )
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        lambda *_args, **_kwargs: [{"teachingClassID": course.id}],
+    )
     monkeypatch.setattr(config, "count", 1)
     monkeypatch.setattr(config, "delay", 0)
 

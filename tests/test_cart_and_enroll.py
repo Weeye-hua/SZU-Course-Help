@@ -65,6 +65,11 @@ def test_grab_courses_uses_existing_request_function_and_marks_success(tmp_path,
             calls.append((class_id, course_type, campus)) or FakeResponse()
         ),
     )
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        lambda *_args, **_kwargs: [{"teachingClassID": course.id}],
+    )
     monkeypatch.setattr(config, "count", 1)
     monkeypatch.setattr(config, "delay", 0)
 

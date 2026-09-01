@@ -29,6 +29,7 @@ def _school_request(
     token: str = "",
     cookie: str | None = None,
     read_only: bool = False,
+    timeout=REQUEST_TIMEOUT,
 ):
     def sender(**kwargs):
         kwargs.pop("method", None)
@@ -43,7 +44,7 @@ def _school_request(
         params=params,
         token=token,
         cookie=cookie,
-        timeout=REQUEST_TIMEOUT,
+        timeout=timeout,
         read_only=read_only,
         # WebVPN is a read-only fallback. Enrollment and withdrawal always use
         # the primary school endpoint, even if a prior query used WebVPN.
@@ -54,6 +55,8 @@ def _school_request(
 def query_enrolled_courses(
     combined_cookie: str,
     token: str,
+    *,
+    timeout=REQUEST_TIMEOUT,
 ) -> list[dict[str, Any]]:
     """Return the current student's selected courses from the school system."""
     timestamp = int(time.time() * 1000)
@@ -62,6 +65,7 @@ def query_enrolled_courses(
         token=token,
         cookie=combined_cookie,
         read_only=True,
+        timeout=timeout,
     )
 
     if is_session_expired_response(
@@ -87,11 +91,44 @@ def query_enrolled_courses(
     ):
         raise SchoolSessionExpiredError("school session expired")
 
-    data_list = payload.get("dataList") or []
+    code = payload.get("code")
+    if code is not None and str(code).strip().lower() not in {"1", "200", "ok", "success"}:
+        raise ValueError(f"school enrolled-course query was rejected with code {code}")
+    if "dataList" not in payload:
+        raise ValueError("school enrolled-course response has no dataList")
+
+    data_list = payload.get("dataList")
+    if data_list is None:
+        data_list = []
     if not isinstance(data_list, list):
         raise ValueError("school enrolled-course dataList must be a list")
 
     return data_list
+
+
+def enrolled_teaching_class_id(item: Any) -> str:
+    """Return the canonical teaching-class ID from one selected-course row."""
+    if not isinstance(item, dict):
+        return ""
+    return str(
+        item.get("teachingClassID")
+        or item.get("teachingClassId")
+        or item.get("teaching_class_id")
+        or ""
+    ).strip()
+
+
+def enrolled_teaching_class_ids(items: list[dict[str, Any]]) -> set[str]:
+    """Strictly validate selected-course rows before using them as proof."""
+    ids: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"school enrolled-course row {index} must be an object")
+        class_id = enrolled_teaching_class_id(item)
+        if not class_id:
+            raise ValueError(f"school enrolled-course row {index} has no teaching-class ID")
+        ids.add(class_id)
+    return ids
 
 
 def submit_course_selection(
@@ -130,6 +167,8 @@ def submit_course_selection(
 __all__ = [
     "REQUEST_TIMEOUT",
     "SchoolSessionExpiredError",
+    "enrolled_teaching_class_id",
+    "enrolled_teaching_class_ids",
     "query_enrolled_courses",
     "submit_course_selection",
 ]

@@ -43,6 +43,12 @@ def _prime_cart(monkeypatch, tmp_path, courses, status=database.STATUS_IN_PROGRE
         cart_service.update_status(course.id, status)
     monkeypatch.setattr(config, "count", 3)
     monkeypatch.setattr(config, "delay", 0)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        lambda *_args, **_kwargs: [{"teachingClassID": course.id} for course in courses],
+    )
+    monkeypatch.setattr(enroll_service, "ENROLLMENT_CONFIRM_RETRY_SECONDS", 0)
     return db
 
 
@@ -189,6 +195,269 @@ def test_success_marks_course_and_stops_requesting_it(tmp_path, monkeypatch):
     assert db.get_courses_by_status(database.STATUS_SUCCESS)[0]["id"] == "ok1"
     # 成功后不再对该课程发请求（config.count=3 也只调用一次）
     assert calls == ["ok1"]
+
+
+def test_success_is_not_recorded_until_exact_class_id_appears(tmp_path, monkeypatch):
+    course = _course(id="strict-id", name="严格核验课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    confirmation_calls = []
+    snapshots = [
+        [{"teachingClassID": "other-id", "courseName": course.name}],
+        [{"teachingClassId": course.id, "courseName": course.name}],
+    ]
+    monkeypatch.setattr(config, "count", 1)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("添加选课志愿成功"),
+    )
+
+    def query_selected(*_args, **kwargs):
+        confirmation_calls.append(kwargs["timeout"])
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        query_selected,
+    )
+
+    assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.COMPLETED
+    assert confirmation_calls == [
+        enroll_service.ENROLLMENT_CONFIRM_TIMEOUT,
+        enroll_service.ENROLLMENT_CONFIRM_TIMEOUT,
+    ]
+    assert db.get_courses_by_status(database.STATUS_SUCCESS)[0]["id"] == course.id
+
+
+def test_false_success_stays_retryable_when_selected_list_is_valid_but_absent(
+    tmp_path, monkeypatch
+):
+    course = _course(id="false-success", name="学校假成功课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    enroll_service._reset_progress([course])
+    monkeypatch.setattr(config, "count", 1)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("添加选课志愿成功"),
+    )
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        lambda *_args, **_kwargs: [],
+    )
+
+    assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
+    assert db.get_courses_by_status(database.STATUS_SUCCESS) == []
+    assert db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]["id"] == course.id
+    progress = enroll_service.get_enroll_progress()["courses"][0]
+    assert progress["failures"] == 1
+    assert "尚未出现该教学班" in progress["message"]
+
+
+def test_already_selected_response_requires_and_accepts_exact_confirmation(tmp_path, monkeypatch):
+    course = _course(id="already-selected", name="已选提示课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 1)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("该教学班已经选过", code="0"),
+    )
+
+    assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.COMPLETED
+    assert db.get_courses_by_status(database.STATUS_SUCCESS)[0]["id"] == course.id
+    assert db.get_courses_by_status(database.STATUS_FAILED) == []
+
+
+def test_confirmation_session_expiry_requests_relogin(tmp_path, monkeypatch):
+    course = _course(id="confirm-expired", name="核验过期课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 1)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("添加选课志愿成功"),
+    )
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            enroll_service.choose_course.SchoolSessionExpiredError("expired")
+        ),
+    )
+
+    assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.SESSION_EXPIRED
+    assert db.get_courses_by_status(database.STATUS_SUCCESS) == []
+    assert db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]["id"] == course.id
+
+
+@pytest.mark.parametrize(
+    "selected_rows",
+    [
+        [{"courseName": "缺失教学班 ID"}],
+        ["not-an-object"],
+    ],
+)
+def test_unverifiable_selected_list_pauses_without_claiming_success(
+    tmp_path, monkeypatch, selected_rows
+):
+    course = _course(id="unverifiable", name="无法核验课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 1)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("添加选课志愿成功"),
+    )
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        lambda *_args, **_kwargs: selected_rows,
+    )
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.PAUSED
+        state = enroll_service.get_enroll_task_state()
+        assert state["pause_source"] == "confirmation_unavailable"
+        assert db.get_courses_by_status(database.STATUS_SUCCESS) == []
+        assert db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]["id"] == course.id
+    finally:
+        enroll_service._release_enroll_task()
+        enroll_service._set_progress_finished()
+
+
+def test_confirmation_network_failure_pauses_without_resubmitting(tmp_path, monkeypatch):
+    course = _course(id="confirm-network", name="核验网络异常课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    submissions = []
+    confirmation_calls = []
+    monkeypatch.setattr(config, "count", 5)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: submissions.append(1) or Resp("添加选课志愿成功"),
+    )
+
+    def unavailable(*_args, **_kwargs):
+        confirmation_calls.append(1)
+        raise requests.Timeout("selected-course endpoint timed out")
+
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        unavailable,
+    )
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.PAUSED
+        assert submissions == [1]
+        assert len(confirmation_calls) == enroll_service.ENROLLMENT_CONFIRM_ATTEMPTS
+        assert db.get_courses_by_status(database.STATUS_SUCCESS) == []
+        assert enroll_service.get_enroll_task_state()["pause_source"] == (
+            "confirmation_unavailable"
+        )
+    finally:
+        enroll_service._release_enroll_task()
+        enroll_service._set_progress_finished()
+
+
+def test_stale_absent_snapshot_followed_by_failures_is_not_treated_as_current(
+    tmp_path, monkeypatch
+):
+    course = _course(id="stale-confirmation", name="核验快照过期课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    responses = iter([[], requests.Timeout("late timeout"), requests.Timeout("late timeout")])
+    monkeypatch.setattr(config, "count", 1)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("添加选课志愿成功"),
+    )
+
+    def mixed_confirmation(*_args, **_kwargs):
+        result = next(responses)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        mixed_confirmation,
+    )
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.PAUSED
+        assert db.get_courses_by_status(database.STATUS_SUCCESS) == []
+        assert enroll_service.get_enroll_task_state()["pause_source"] == (
+            "confirmation_unavailable"
+        )
+    finally:
+        enroll_service._release_enroll_task()
+        enroll_service._set_progress_finished()
+
+
+def test_confirmed_course_pauses_if_local_success_state_cannot_be_saved(tmp_path, monkeypatch):
+    course = _course(id="local-write", name="本地写入异常课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 1)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("添加选课志愿成功"),
+    )
+    monkeypatch.setattr(enroll_service.cart_service, "update_status", lambda *_args: False)
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.PAUSED
+        assert enroll_service.get_enroll_task_state()["pause_source"] == "local_state_error"
+        assert db.get_courses_by_status(database.STATUS_SUCCESS) == []
+        assert db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]["id"] == course.id
+    finally:
+        enroll_service._release_enroll_task()
+        enroll_service._set_progress_finished()
+
+
+def test_user_pause_interrupts_confirmation_retry(tmp_path, monkeypatch):
+    course = _course(id="confirm-pause", name="核验中暂停课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 1)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("添加选课志愿成功"),
+    )
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "query_enrolled_courses",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def pause_at_retry(_seconds):
+        assert enroll_service.pause_enroll_task()[0]
+        return False
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        monkeypatch.setattr(enroll_service, "_wait_between_requests", pause_at_retry)
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.PAUSED
+        assert db.get_courses_by_status(database.STATUS_SUCCESS) == []
+        assert db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]["id"] == course.id
+        assert enroll_service.get_enroll_task_state()["pause_source"] == "user"
+    finally:
+        enroll_service._release_enroll_task()
+        enroll_service._set_progress_finished()
 
 
 def test_terminal_error_marks_failed_and_stops(tmp_path, monkeypatch):
@@ -770,7 +1039,7 @@ def test_progress_snapshot_reports_success_and_event(tmp_path, monkeypatch):
     assert snapshot["counts"]["success"] == 1
     assert snapshot["counts"]["total"] == 1
     assert snapshot["courses"][0]["status"] == database.STATUS_SUCCESS
-    assert any("已加入我的课程" in event["message"] for event in snapshot["events"])
+    assert any("已由学校已选课程列表确认选中" in event["message"] for event in snapshot["events"])
 
 
 # ------------------------------------------------------------------

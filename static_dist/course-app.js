@@ -234,6 +234,17 @@ function courseSummary(totalCount, courseCount, metadata = {}) {
   return `缓存课程：${base}（最近更新 ${cacheTimestampLabel(metadata.cached_at)}）`;
 }
 
+function visibleCourseSummary(visibleCount) {
+  const base = courseSummary(
+    appState.totalCount,
+    appState.courses.length,
+    appState.courseCacheMeta || {},
+  );
+  return visibleCount === appState.courses.length
+    ? base
+    : `${base}，筛选后显示 ${visibleCount} 门`;
+}
+
 function clearCacheRefreshTimer() {
   if (appState.cacheRefreshTimer) {
     window.clearInterval(appState.cacheRefreshTimer);
@@ -1444,6 +1455,7 @@ function renderCourses() {
     return;
   }
   const visibleCourses = appState.courses.filter((course) => courseHasVisibleClasses(course));
+  appElements.courseSummary.textContent = visibleCourseSummary(visibleCourses.length);
   if (!visibleCourses.length) {
     renderState(
       "当前筛选条件下没有可显示的课程",

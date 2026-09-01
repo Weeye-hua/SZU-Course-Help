@@ -173,7 +173,7 @@ def _map_enrolled_row(item: dict) -> dict[str, str]:
     if not isinstance(item, dict):
         return {}
     return {
-        "teaching_class_id": str(item.get("teachingClassID") or item.get("teachingClassId") or ""),
+        "teaching_class_id": choose_course.enrolled_teaching_class_id(item),
         "course_name": str(item.get("courseName") or "未命名课程"),
         "teacher_name": str(item.get("teacherName") or ""),
         "teaching_place": str(item.get("teachingPlace") or ""),
