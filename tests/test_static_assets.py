@@ -204,7 +204,7 @@ def test_drawer_dialog_keeps_header_and_footer_outside_scroll_region():
     assert ".my-courses-dialog-body" in styles
 
 
-def test_course_filters_are_exclusion_filters_and_keep_empty_groups():
+def test_course_filters_are_exclusion_filters_and_hide_empty_groups():
     course = (STATIC / "index.html").read_text(encoding="utf-8")
     script = (STATIC / "course-app.js").read_text(encoding="utf-8")
     styles = (STATIC / "styles.css").read_text(encoding="utf-8")
@@ -216,8 +216,13 @@ def test_course_filters_are_exclusion_filters_and_keep_empty_groups():
     assert "if (classIsSelected(classInfo)) return true;" in script
     assert "FILTER_PREFERENCES_KEY" in script
     assert "saveFilterPreferences" in script
-    assert "当前筛选条件下没有符合条件的教学班" in script
     assert ".course-group.is-selected" in styles
+    # 筛选后没有可见教学班的课程连同选项卡一起隐藏，不再展示“0 / N 个教学班”。
+    assert "courseHasVisibleClasses" in script
+    assert ".filter((course) => courseHasVisibleClasses(course))" in script
+    assert "appState.courses.filter((course) => courseHasVisibleClasses(course))" in script
+    assert "当前筛选条件下没有可显示的课程" in script
+    assert "当前筛选条件下没有符合条件的教学班" not in script
 
 
 def test_conflict_timetable_context_is_rendered_and_highlighted():

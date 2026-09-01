@@ -614,6 +614,13 @@ function visibleTeachingClasses(course) {
   });
 }
 
+function courseHasVisibleClasses(course) {
+  const classes = Array.isArray(course.tcList) ? course.tcList : [];
+  // 没有教学班属于学校数据为空，保留“暂无教学班”展示，不属于被筛选隐藏。
+  if (!classes.length) return true;
+  return visibleTeachingClasses(course).length > 0;
+}
+
 function campusOptions(session = appState.session) {
   return Array.isArray(session?.campus_options)
     ? session.campus_options.filter((item) => item?.code && item?.name)
@@ -1354,8 +1361,6 @@ function renderCourseList(courses) {
     const classes = element("div", "class-list");
     if (!(course.tcList || []).length) {
       classes.append(element("div", "empty-state", "暂无教学班"));
-    } else if (!visibleClasses.length) {
-      classes.append(element("div", "filtered-empty", "当前筛选条件下没有符合条件的教学班"));
     } else {
       for (const classInfo of visibleClasses) appendClassRow(classes, course, classInfo);
     }
@@ -1370,7 +1375,9 @@ function applyCourseFilter() {
   if (!cache || !cache.complete || cache.scopeKey !== catalogScopeKey()) return;
   const keyword = appState.searchKeyword.toLowerCase();
   const results = keyword
-    ? cache.courses.filter((course) => courseMatchesKeyword(course, keyword))
+    ? cache.courses
+      .filter((course) => courseMatchesKeyword(course, keyword))
+      .filter((course) => courseHasVisibleClasses(course))
     : [];
   appState.searchResults = results;
   const totalPages = Math.max(1, Math.ceil(results.length / FILTER_PAGE_SIZE));
@@ -1409,7 +1416,13 @@ function renderFilteredCourses() {
 
   const results = Array.isArray(appState.searchResults) ? appState.searchResults : [];
   if (!results.length) {
-    renderState("没有匹配的课程", "换一个关键词，或切换课程目录后重试。");
+    const filtersOn = appState.filters.hideConflict || appState.filters.hideFull;
+    renderState(
+      "没有匹配的课程",
+      filtersOn
+        ? "换个关键词，或关闭“不显示时间冲突”“不显示人数已满”后重试。"
+        : "换一个关键词，或切换课程目录后重试。",
+    );
     updatePagination();
     return;
   }
@@ -1430,7 +1443,15 @@ function renderCourses() {
     renderState("本页没有课程", "学校系统当前没有返回该目录的课程。");
     return;
   }
-  renderCourseList(appState.courses);
+  const visibleCourses = appState.courses.filter((course) => courseHasVisibleClasses(course));
+  if (!visibleCourses.length) {
+    renderState(
+      "当前筛选条件下没有可显示的课程",
+      "本页课程的教学班都被“不显示时间冲突”或“不显示人数已满”隐藏了，关闭对应筛选即可恢复显示。",
+    );
+    return;
+  }
+  renderCourseList(visibleCourses);
 }
 
 function updatePagination() {
