@@ -35,7 +35,8 @@ from services import cart_service
 from services.auth_service import (
     attempt_automatic_relogin,
 )
-from services.course_service import query_courses
+from services.course_service import SESSION_EXPIRED, query_courses
+from study_program import is_graduate
 
 _task_state_lock = threading.RLock()
 _task_condition = threading.Condition(_task_state_lock)
@@ -724,6 +725,20 @@ def _classify_response(response) -> str:
         text=text,
     ):
         return "expired"
+    if is_graduate():
+        if status_code in {301, 303, 307, 308} or any(
+            word in searchable for word in ("登录超时", "未登录", "请重新登录", "登录已过期")
+        ):
+            return "expired"
+        if code == "1":
+            return "success"
+        if any(
+            word in message
+            for word in ("已经选择", "重复选课", "已选该课程", "已经选过", "已选此课程")
+        ):
+            return "already_selected"
+        if any(word in message for word in ("容量已满", "人数已满", "已满员")):
+            return "retry"
     if SUCCESS_KEYWORD in searchable:
         return "success"
     if any(keyword in searchable for keyword in ALREADY_SELECTED_KEYWORDS):
@@ -870,6 +885,8 @@ def _scan_course_available(course) -> int:
         while page < 100:
             success, result, _ = query_courses(course.type, page)
             if not success:
+                if result == SESSION_EXPIRED:
+                    raise choose_course.SchoolSessionExpiredError("扫描目录时学校登录已过期")
                 return 0
             listed_courses = getattr(result, "courses", None)
             if listed_courses is None:
@@ -908,6 +925,8 @@ def _scan_course_available(course) -> int:
             if not listed_courses or page + 1 >= max(1, math.ceil(total_count / 10)):
                 break
             page += 1
+    except choose_course.SchoolSessionExpiredError:
+        raise
     except Exception as exc:
         logger.info("Scan query failed for %s: %s", course.name, exc)
     return 0
@@ -1018,9 +1037,12 @@ def _course_from_row(item: dict) -> EnrollmentCourse:
         id=str(item["id"]),
         type=str(item["type"]),
         name=str(item["name"]),
-        campus_code=str(item.get("campus_code") or DEFAULT_CAMPUS_CODE),
+        campus_code="" if is_graduate() else str(item.get("campus_code") or DEFAULT_CAMPUS_CODE),
         campus_name=str(
-            item.get("campus_name") or campus_name(item.get("campus_code") or DEFAULT_CAMPUS_CODE)
+            ""
+            if is_graduate()
+            else item.get("campus_name")
+            or campus_name(item.get("campus_code") or DEFAULT_CAMPUS_CODE)
         ),
         course_number=str(item.get("course_number") or ""),
         teaching_place=str(item.get("teaching_place") or ""),
@@ -1102,7 +1124,11 @@ def grab_courses(courses: list) -> GrabOutcome:
             mode = get_enroll_task_state()["mode"]
             if mode == "scan":
                 _update_course_progress(course.id, message="扫描课程目录，等待课程放课")
-                available_slots = _scan_course_available(course)
+                try:
+                    available_slots = _scan_course_available(course)
+                except choose_course.SchoolSessionExpiredError:
+                    _add_event("warn", "扫描目录时检测到登录已过期，准备自动重新登录")
+                    return GrabOutcome.SESSION_EXPIRED
                 if available_slots <= 0:
                     if not _wait_between_requests(_mode_interval_seconds("scan")):
                         return GrabOutcome.PAUSED

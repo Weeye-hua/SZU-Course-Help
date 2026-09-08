@@ -14,6 +14,7 @@ class ApiError extends Error {
 }
 
 const loginState = {
+  program: "undergraduate",
   captcha: null,
   captchaStatus: "idle",
   captchaFailureMessage: "",
@@ -69,6 +70,7 @@ function setLoginMessage(message, success = false) {
 }
 
 function selectedBackend() {
+  if (loginState.program === "graduate") return "primary";
   return document.querySelector("input[name='backend']:checked")?.value || "auto";
 }
 
@@ -134,6 +136,8 @@ function updateLoginControls() {
   loginElements.solveCaptcha.disabled = busy || !captchaReady;
   loginElements.submit.disabled = loginState.submitting || loginState.solvingCaptcha || !captchaReady;
   loginElements.solveCaptcha.textContent = loginState.solvingCaptcha ? "识别中…" : "自动识别";
+  const textInput = document.querySelector("#textCaptcha");
+  if (textInput) textInput.disabled = busy || !captchaReady;
 }
 
 function isValidStudentId(value) {
@@ -166,6 +170,9 @@ function setCaptchaStatus(status, title = "", detail = "") {
   loginElements.captchaActions.hidden = webvpnFallback;
   loginElements.statusTitle.textContent = title || fallback[0];
   loginElements.statusDetail.textContent = detail || fallback[1];
+  if (loginState.program === "graduate" && status === "ready") {
+    loginElements.statusDetail.textContent = "请输入图片中的四位字符。";
+  }
   loginElements.captchaWebvpnAuth.hidden = !webvpnFallback && status !== "webvpn-auth-required";
   if (webvpnFallback) {
     const detailElement = loginElements.captchaWebvpnAuth.querySelector("span");
@@ -200,6 +207,11 @@ async function solveCaptcha() {
       loginState.captcha = result.captcha;
       await loadCaptchaImage(result.captcha.imageUrl);
       renderCaptchaPoints();
+    }
+    if (loginState.program === "graduate") {
+      document.querySelector("#textCaptcha").value = result.text || "";
+      setLoginMessage(result.text ? "验证码已填入" : result.message || "未能识别，请手动输入", Boolean(result.text));
+      return;
     }
     const points = result.points;
     if (Array.isArray(points) && points.length === 4) {
@@ -435,6 +447,8 @@ async function loadCaptcha() {
   loginState.loadingCaptcha = true;
   loginState.captcha = null;
   loginState.captchaFailureMessage = "";
+  const textInput = document.querySelector("#textCaptcha");
+  if (textInput) textInput.value = "";
   clearCaptchaPoints();
   clearCaptchaImage();
   setCaptchaStatus("loading");
@@ -522,6 +536,7 @@ async function startWebvpnAuth() {
 }
 
 function addCaptchaPoint(event) {
+  if (loginState.program === "graduate") return;
   if (
     loginState.captchaStatus !== "ready" ||
     !loginState.captcha ||
@@ -558,7 +573,14 @@ async function submitLogin(event) {
     setLoginMessage(loginState.captchaFailureMessage || "请先成功获取验证码");
     return;
   }
-  if (loginState.points.length !== 4) {
+  const graduate = loginState.program === "graduate";
+  const textCode = document.querySelector("#textCaptcha")?.value.trim() || "";
+  if (graduate && !/^[A-Za-z0-9]{4}$/.test(textCode)) {
+    setLoginMessage("请输入图片中的四位字母或数字验证码");
+    document.querySelector("#textCaptcha").focus();
+    return;
+  }
+  if (!graduate && loginState.points.length !== 4) {
     setLoginMessage("请按顺序完成四个验证码点击点");
     return;
   }
@@ -577,7 +599,7 @@ async function submitLogin(event) {
         password,
         card_key: cardKey,
         vtoken: loginState.captcha.vtoken,
-        verifyCode: loginState.points,
+        verifyCode: graduate ? textCode : loginState.points,
         cookie: loginState.captcha.cookie,
         backend: loginState.backend,
       }),
@@ -588,7 +610,7 @@ async function submitLogin(event) {
     const failureMessage = error instanceof Error ? error.message : "登录失败";
     const refreshed = await loadCaptcha();
     if (refreshed) {
-      setLoginMessage(`${failureMessage}；验证码已更新，请重新点击四个汉字。`);
+      setLoginMessage(`${failureMessage}；验证码已更新，${graduate ? "请重新输入四位字符" : "请重新点击四个汉字"}。`);
     } else {
       const captchaMessage = loginState.captchaFailureMessage || "新验证码获取失败，请手动重试。";
       setLoginMessage(`${failureMessage}；${captchaMessage}`);
@@ -608,6 +630,20 @@ async function initializeLogin() {
       requestJson("/api/bootstrap"),
       requestJson("/api/session"),
     ]);
+    loginState.program = bootstrap.program || "undergraduate";
+    const graduate = loginState.program === "graduate";
+    document.querySelector("#programLabel").textContent = `${graduate ? "研究生" : "本科生"} · 本地安全登录`;
+    document.querySelector("#textCaptchaField").hidden = !graduate;
+    document.querySelector(".backend-fieldset").hidden = graduate;
+    loginElements.stage.classList.toggle("is-text-captcha", graduate);
+    loginElements.undo.hidden = graduate;
+    loginElements.progress.hidden = graduate;
+    loginElements.markers.hidden = graduate;
+    if (graduate) {
+      document.querySelector("#loginIntro").textContent = "研究生选课系统";
+      document.querySelector("#captchaLabel").textContent = "图片验证码";
+      loginElements.image.alt = "四位字符验证码";
+    }
     setBackendPresentation(bootstrap);
     const radio = document.querySelector(`input[name='backend'][value='${bootstrap.preference || "auto"}']`);
     if (radio) radio.checked = true;

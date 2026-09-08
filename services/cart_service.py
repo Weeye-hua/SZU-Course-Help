@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from contextlib import suppress
 from typing import Any
 
@@ -20,10 +21,26 @@ import database
 from campus import get_campus
 from course_models import priority_group_key, time_signature
 from database import DatabaseManager
+from project_paths import data_dir
+from study_program import is_graduate
 
 # 全局数据库实例
 db = DatabaseManager()
 db.recover_interrupted_courses()
+_graduate_account = ""
+
+
+def bind_graduate_account(student_id: str) -> None:
+    """Keep each graduate account's queue separate, including after restart."""
+    global db, _graduate_account
+    if not is_graduate() or _graduate_account == student_id:
+        return
+    digest = hashlib.sha256(student_id.encode("utf-8")).hexdigest()[:24]
+    new_db = DatabaseManager(data_dir() / "accounts" / digest / "course_enroll.db")
+    new_db.recover_interrupted_courses()
+    db.close()
+    db = new_db
+    _graduate_account = student_id
 
 
 def add_course(course: Any) -> dict[str, bool | str]:
@@ -53,8 +70,13 @@ def add_course(course: Any) -> dict[str, bool | str]:
         return {"success": False, "message": "课程信息不完整，无法加入购物车"}
 
     campus_code = str(getattr(course, "campus_code", "01") or "01").strip()
-    if get_campus(campus_code) is None:
+    if not is_graduate() and get_campus(campus_code) is None:
         return {"success": False, "message": "校区信息无效，无法加入购物车"}
+    if is_graduate() and getattr(course, "type", "") not in {"GPN", "GCROSS"}:
+        return {
+            "success": False,
+            "message": "请从研究生方案内或跨专业课程加入清单，开课查询仅供查阅",
+        }
 
     if not getattr(course, "course_number", ""):
         with suppress(AttributeError):

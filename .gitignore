@@ -41,6 +41,7 @@ webvpn-browser-profile
 .migration.lock
 course_catalog_cache_v2.json
 runtime-data/
+graduate/
 
 # Captcha/OCR working files may contain session-derived data.
 img/

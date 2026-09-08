@@ -86,6 +86,9 @@ jobs:
       - name: Build native release package
         run: python scripts/build_release.py
 
+      - name: Smoke-test both study programs
+        run: python scripts/check_release_startup.py release
+
       - name: Smoke-test child process env isolation
         if: runner.os == 'Linux'
         run: python scripts/check_release_child_env.py release

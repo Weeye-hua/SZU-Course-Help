@@ -71,8 +71,9 @@ def main() -> int:
         # Keep the smoke test's runtime data inside the temporary directory.
         env["COURSE_SELECT_DATA_DIR"] = str(tmp_path / "data")
         env["COURSE_SELECT_KEY_DIR"] = str(tmp_path / "data" / "keys")
-        # v3.6.x startup issues one Card Key prompt, then asks to enter the UI.
-        stdin_feed = b"23010001\nY\n"
+        # Exercise the interactive program selector before the Card Key prompt.
+        env.pop("COURSE_SELECT_PROGRAM", None)
+        stdin_feed = b"1\n23010001\nY\n"
 
         process = subprocess.Popen(
             [str(binary)],
@@ -105,6 +106,7 @@ def main() -> int:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(timeout=10)
 
         captured = stub_log.read_text(encoding="utf-8")
         failures = []

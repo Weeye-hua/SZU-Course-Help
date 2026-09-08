@@ -15,6 +15,7 @@ from weakref import WeakSet
 from campus import DEFAULT_CAMPUS_CODE, get_campus
 from course_models import priority_group_key
 from project_paths import data_dir
+from study_program import is_graduate
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ class CartCourse(Protocol):
 
 
 def _default_db_path() -> Path:
+    if is_graduate():
+        return data_dir() / "course_enroll.db"
     configured = os.getenv("COURSE_SELECT_DB_PATH", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
@@ -198,7 +201,7 @@ class DatabaseManager:
                 getattr(course, "campus_code", DEFAULT_CAMPUS_CODE) or DEFAULT_CAMPUS_CODE
             ).strip()
             selected_campus = get_campus(raw_campus_code)
-            if selected_campus is None:
+            if selected_campus is None and not is_graduate():
                 return False
             teaching_place = str(getattr(course, "teaching_place", "") or "")
             course_name = str(getattr(course, "course_name", "") or "")
@@ -255,8 +258,8 @@ class DatabaseManager:
                         course.id,
                         course.type,
                         course.name,
-                        selected_campus.code,
-                        selected_campus.name,
+                        "" if is_graduate() else selected_campus.code,
+                        "" if is_graduate() else selected_campus.name,
                         STATUS_NOT_STARTED,
                         now,
                         teaching_place,

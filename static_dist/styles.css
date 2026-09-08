@@ -3146,3 +3146,16 @@ dialog::backdrop {
     max-height: none;
   }
 }
+/* Graduate text captchas keep their own geometry instead of click coordinates. */
+.captcha-stage.is-text-captcha { aspect-ratio: auto; min-height: 116px; cursor: default; }
+.captcha-stage.is-text-captcha img { width: auto; max-width: 100%; height: 80px; object-fit: contain; margin: 18px auto; }
+#textCaptchaField { margin-top: 12px; }
+#textCaptcha { font-family: monospace; font-size: 20px; letter-spacing: 0; }
+.graduate-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 18px; }
+.graduate-filters .field { min-width: 160px; max-width: 280px; }
+.graduate-filters select { width: 100%; min-height: 42px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 8px 12px; font: inherit; }
+@media (max-height: 500px) {
+  .drawer-dialog > .dialog-header { padding: 12px 20px; }
+  .drawer-dialog > .dialog-footer { max-height: 35dvh; overflow-y: auto; padding: 12px 20px; }
+  .drawer-dialog > .my-courses-dialog-body { min-height: 110px; }
+}

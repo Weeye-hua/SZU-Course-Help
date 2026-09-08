@@ -19,8 +19,9 @@ from campus import (
     get_campus,
 )
 from school_password import encrypt_school_password
-from services import backend_service
+from services import backend_service, graduate_service
 from services.session_manager import session_manager
+from study_program import is_graduate, program_payload
 
 logger = logging.getLogger(__name__)
 LOGIN_ERROR_MSG = "登录失败，请检查学号、密码、卡密或验证码是否正确"
@@ -145,7 +146,7 @@ def validate_login_params(
     student_id: str,
     password: str,
     card_key: str,
-    verify_code: list,
+    verify_code: list | str,
     vtoken: str = "",
     cookie: str = "",
 ) -> str | None:
@@ -158,6 +159,12 @@ def validate_login_params(
         return LOGIN_ERROR_MSG
     if not vtoken or not vtoken.strip() or not cookie or not cookie.strip():
         return LOGIN_ERROR_MSG
+    if is_graduate():
+        return (
+            None
+            if graduate_service.validate_text_captcha(verify_code)
+            else "请输入四位字母或数字验证码"
+        )
     if not verify_code or len(verify_code) != 4:
         return LOGIN_ERROR_MSG
     for coordinate in verify_code:
@@ -173,7 +180,11 @@ def validate_login_params(
 
 def encrypt_password(password: str) -> str:
     """Return the school's legacy ``loginPwd`` value."""
-    return encrypt_school_password(password)
+    return (
+        graduate_service.encrypt_password(password)
+        if is_graduate()
+        else encrypt_school_password(password)
+    )
 
 
 def perform_school_login(
@@ -184,7 +195,8 @@ def perform_school_login(
     parsed_cookie: str,
 ) -> dict[str, Any]:
     """Call the school login endpoint without changing its request fields."""
-    return logic.login(
+    login_function = graduate_service.login if is_graduate() else logic.login
+    return login_function(
         student_id,
         vtoken,
         login_pwd,
@@ -211,12 +223,22 @@ def save_login_state(
     if not login_cookie or not captcha_cookie or not token:
         raise ValueError("complete login cookies and token are required")
     with _state_lock:
-        config.combined_cookie = f"{login_cookie}; {captcha_cookie}"
+        if is_graduate():
+            from services import cart_service
+
+            cart_service.bind_graduate_account(student_id)
+        config.combined_cookie = (
+            graduate_service.merge_cookies(captcha_cookie, login_cookie)
+            if is_graduate()
+            else f"{login_cookie}; {captcha_cookie}"
+        )
         config.token = str(token)
         config.student_id = str(student_id)
         config.password = password
         config.elective_batch_code = ""
         config.elective_batch_name = ""
+        if is_graduate():
+            graduate_service.clear_window()
         if not preserve_relogin_state:
             config.campus_code = DEFAULT_CAMPUS_CODE
             config.campus_name = DEFAULT_CAMPUS_NAME
@@ -242,6 +264,8 @@ def clear_login_state() -> None:
         config.campus_name = DEFAULT_CAMPUS_NAME
         _advance_session_generation()
         _reset_relogin_state_locked()
+        if is_graduate():
+            graduate_service.clear_window()
 
 
 def invalidate_school_session() -> None:
@@ -251,6 +275,8 @@ def invalidate_school_session() -> None:
         config.token = ""
         config.elective_batch_code = ""
         config.elective_batch_name = ""
+        if is_graduate():
+            graduate_service.clear_window()
         _advance_session_generation()
 
 
@@ -259,6 +285,8 @@ def clear_elective_batch() -> None:
     with _state_lock:
         config.elective_batch_code = ""
         config.elective_batch_name = ""
+        if is_graduate():
+            graduate_service.clear_window()
 
 
 def update_backend_preference(preference: str) -> str:
@@ -271,12 +299,14 @@ def get_session_snapshot() -> dict[str, str | bool | int]:
     """Return a consistent, password-free view of the current session."""
     with _state_lock:
         return {
+            **program_payload(),
+            **(graduate_service.window_payload() if is_graduate() else {}),
             "logged_in": bool(config.token and config.combined_cookie),
             "student_id": str(config.student_id or ""),
             "batch_code": str(config.elective_batch_code or ""),
             "batch_name": str(config.elective_batch_name or ""),
-            "campus_code": str(config.campus_code or DEFAULT_CAMPUS_CODE),
-            "campus_name": str(config.campus_name or DEFAULT_CAMPUS_NAME),
+            "campus_code": "" if is_graduate() else str(config.campus_code or DEFAULT_CAMPUS_CODE),
+            "campus_name": "" if is_graduate() else str(config.campus_name or DEFAULT_CAMPUS_NAME),
             "relogin_in_progress": _relogin_state["status"] == "running",
             "relogin_status": str(_relogin_state["status"]),
             "relogin_message": str(_relogin_state["message"]),
@@ -338,6 +368,8 @@ def refresh_elective_batch(
             raise RuntimeError("登录状态已变化，已丢弃过期批次结果")
         config.elective_batch_code = batch_code
         config.elective_batch_name = batch_name
+        if is_graduate():
+            graduate_service.publish_window(batch_result)
         if adopt_school_campus and get_campus(school_campus_code) is not None:
             config.campus_code = school_campus_code
             config.campus_name = campus_name(school_campus_code)
@@ -346,6 +378,8 @@ def refresh_elective_batch(
 
 def set_current_campus(campus_code: str) -> dict[str, str | bool | int]:
     """Switch the catalog campus without changing the school login session."""
+    if is_graduate():
+        raise ValueError("研究生选课不使用校区切换")
     selected = get_campus(campus_code)
     if selected is None:
         raise ValueError("不支持的校区代码")
@@ -439,16 +473,28 @@ def attempt_automatic_relogin(
         try:
             # The OCR helper follows the same fetch-image -> OCR -> school
             # password-protocol path as the login page.
-            vtoken, captcha_cookie, login_pwd, centres_string = attempt_ocr_relogin(
-                max_attempts=max_attempts
-            )
-            login_result = perform_school_login(
-                student_id,
-                vtoken,
-                login_pwd,
-                centres_string,
-                captcha_cookie,
-            )
+            if is_graduate():
+                login_result, captcha_cookie = graduate_service.automatic_login(
+                    student_id,
+                    password,
+                    max_attempts,
+                    progress=lambda attempt, limit: _set_relogin_state(
+                        "running",
+                        f"正在识别研究生验证码并重新登录（{attempt}/{limit}）",
+                        max_attempts=limit,
+                    ),
+                )
+            else:
+                vtoken, captcha_cookie, login_pwd, centres_string = attempt_ocr_relogin(
+                    max_attempts=max_attempts
+                )
+                login_result = perform_school_login(
+                    student_id,
+                    vtoken,
+                    login_pwd,
+                    centres_string,
+                    captcha_cookie,
+                )
             if not login_result.get("success"):
                 error = login_result.get("error_msg") or "学校拒绝自动重登录"
                 return _finish_relogin_failure(owned_generation, str(error))
@@ -484,7 +530,9 @@ def attempt_automatic_relogin(
                     )
                     _set_relogin_state(
                         "success",
-                        "自动重新登录成功，选课批次暂未刷新；抢课任务将继续",
+                        "自动重新登录成功，开放状态暂未刷新，请重新检查状态"
+                        if is_graduate()
+                        else "自动重新登录成功，选课批次暂未刷新；抢课任务将继续",
                     )
                     return True, ""
             with _state_lock:

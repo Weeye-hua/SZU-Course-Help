@@ -138,6 +138,12 @@ CLOSED_PHASE_KEYWORDS = (
 
 def classify_elective_phase(batch_name: str) -> str:
     """Classify the school-provided batch name without guessing from dates."""
+    from study_program import is_graduate
+
+    if is_graduate():
+        from services.graduate_service import window_payload
+
+        return window_payload()["phase"]
     normalized = str(batch_name or "").strip()
     if any(keyword in normalized for keyword in CLOSED_PHASE_KEYWORDS):
         return PHASE_CLOSED
@@ -155,6 +161,13 @@ def is_automatic_enroll_phase(batch_name: str) -> bool:
 
 def automatic_enroll_block_reason(batch_name: str) -> str | None:
     """Explain why a school batch cannot start automatic enrollment."""
+    from study_program import is_graduate
+
+    if is_graduate():
+        from services.graduate_service import window_payload
+
+        window = window_payload()
+        return None if window["phase"] == PHASE_AUTOMATIC else window["phase_message"]
     normalized = str(batch_name or "").strip()
     phase = classify_elective_phase(normalized)
     display_name = normalized or "未知"

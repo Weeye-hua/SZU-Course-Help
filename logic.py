@@ -280,6 +280,15 @@ def fetch_elective_batch(
     combined_cookie: str,
 ) -> ElectiveBatchResult:
     """Fetch the enrollment batch using one consistent session snapshot."""
+    from study_program import is_graduate
+
+    if is_graduate():
+        from services import graduate_service
+
+        try:
+            return graduate_service.fetch_batch(student_id, combined_cookie)
+        except graduate_service.GraduateSessionExpiredError as exc:
+            raise SchoolBatchSessionExpiredError(str(exc)) from exc
     response = _school_request(
         "POST",
         f"student/{student_id}.do",
@@ -1044,11 +1053,17 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
 
 
 def fetch_vtoken_and_image(max_attempts: int = 3) -> dict[str, str]:
-    """Fetch a click captcha while preserving terminal and transient failures."""
+    """Fetch the selected program's captcha with bounded attempts."""
+    from study_program import is_graduate
+
     if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
         raise TypeError("max_attempts must be an integer")
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
+    if is_graduate():
+        from services.graduate_service import fetch_captcha
+
+        return fetch_captcha()
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:

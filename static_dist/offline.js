@@ -6,6 +6,7 @@ const COURSE_TYPES = {
 };
 const PAGE_SIZE = 10;
 const state = {
+  graduate: false,
   type: "TJKC",
   page: 1,
   keyword: "",
@@ -109,9 +110,9 @@ function renderCourses() {
       .toLowerCase()
       .includes(keyword);
   });
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil((state.graduate ? Number(state.metadata.total_count || 0) : filtered.length) / PAGE_SIZE));
   state.page = Math.min(state.page, totalPages);
-  const pageCourses = filtered.slice((state.page - 1) * PAGE_SIZE, state.page * PAGE_SIZE);
+  const pageCourses = state.graduate ? filtered : filtered.slice((state.page - 1) * PAGE_SIZE, state.page * PAGE_SIZE);
   elements.list.replaceChildren();
   if (!pageCourses.length) {
     elements.list.append(makeElement("div", "empty-state", "暂无符合条件的本地课程"));
@@ -146,22 +147,22 @@ function renderCourses() {
   const cachedText = state.metadata.cached
     ? `；缓存于 ${cacheDate(state.metadata.cached_at)}`
     : "";
-  elements.summary.textContent = `共 ${filtered.length} 门课程，本页 ${pageCourses.length} 门${cachedText}`;
+  elements.summary.textContent = `共 ${state.graduate ? state.metadata.total_count || 0 : filtered.length} 门课程，本页 ${pageCourses.length} 门${cachedText}`;
   elements.pageLabel.textContent = `第 ${state.page} / ${totalPages} 页`;
   elements.previous.disabled = state.page <= 1;
   elements.next.disabled = state.page >= totalPages;
 }
 
-async function loadCourses(type = state.type) {
+async function loadCourses(type = state.type, page = 1) {
   state.type = type;
-  state.page = 1;
+  state.page = page;
   state.keyword = elements.search.value.trim();
   elements.title.textContent = COURSE_TYPES[type];
   elements.summary.textContent = "正在读取本地缓存";
   elements.list.replaceChildren(makeElement("div", "empty-state", "正在读取本地缓存"));
   try {
     const data = await requestJson(
-      `/api/school/courses?type=${encodeURIComponent(type)}&page=1&page_size=10&cache_mode=true`,
+      `/api/school/courses?type=${encodeURIComponent(type)}&page=${page}&page_size=10&cache_mode=true`,
     );
     state.courses = Array.isArray(data.courses) ? data.courses : [];
     state.metadata = data;
@@ -217,19 +218,40 @@ elements.types.addEventListener("click", (event) => {
 });
 elements.search.addEventListener("input", () => {
   state.keyword = elements.search.value.trim();
-  state.page = 1;
+  if (!state.graduate) state.page = 1;
   renderCourses();
 });
 elements.previous.addEventListener("click", () => {
   if (state.page > 1) {
     state.page -= 1;
+    if (state.graduate) { loadCourses(state.type, state.page); return; }
     renderCourses();
   }
 });
 elements.next.addEventListener("click", () => {
   state.page += 1;
+  if (state.graduate) { loadCourses(state.type, state.page); return; }
   renderCourses();
 });
 
-loadCourses();
-loadCart();
+async function initializeOffline() {
+  try {
+    const bootstrap = await requestJson("/api/bootstrap");
+    state.graduate = bootstrap.program === "graduate";
+    if (state.graduate) {
+      Object.assign(COURSE_TYPES, { GPN: "方案内课程", GCROSS: "跨专业课程", GALL: "开课查询" });
+      state.type = "GPN";
+      elements.types.replaceChildren();
+      for (const type of ["GPN", "GCROSS", "GALL"]) {
+        const button = makeElement("button", `button button-secondary${type === "GPN" ? " is-active" : ""}`, COURSE_TYPES[type]);
+        button.type = "button";
+        button.dataset.type = type;
+        elements.types.append(button);
+      }
+      elements.search.placeholder = "搜索当前缓存页";
+    }
+    await loadCourses();
+    await loadCart();
+  } catch (error) { elements.summary.textContent = error.message; }
+}
+initializeOffline();

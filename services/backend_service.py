@@ -299,6 +299,20 @@ def request_with_failover(
 
 
 def backend_payload() -> dict[str, Any]:
+    from study_program import is_graduate
+
+    if is_graduate():
+        return {
+            "preference": "primary",
+            "preference_label": "研究生选课系统",
+            "active_backend": "primary",
+            "active_backend_label": "研究生主站",
+            "active_host": "ehall.szu.edu.cn",
+            "webvpn_authenticated": False,
+            "auto_fallback_active": False,
+            "primary_cooldown_remaining": 0,
+            "primary_cooldown_until": None,
+        }
     profile = active_profile()
     preference = get_preference()
     remaining = primary_cooldown_remaining()

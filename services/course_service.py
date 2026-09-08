@@ -24,7 +24,9 @@ from course_list import (
 )
 from course_models import CoursesResponse
 from school_session import is_session_expired_response
+from services import graduate_service
 from services.catalog_pacing import pace_catalog_request
+from study_program import is_graduate
 
 logger = logging.getLogger(__name__)
 SESSION_EXPIRED = "SESSION_EXPIRED"
@@ -77,6 +79,8 @@ UNSUPPORTED_TYPES = frozenset({"FXKC"})
 def is_supported_type(course_type: str) -> bool:
     """Return whether this installation exposes a school course category."""
     normalized = str(course_type or "").strip().upper()
+    if is_graduate():
+        return normalized in graduate_service.CATEGORIES
     return normalized in COURSE_TYPE_MAP and normalized not in UNSUPPORTED_TYPES
 
 
@@ -104,6 +108,17 @@ def query_courses(
 ) -> tuple[bool, Any, str]:
     """Query one zero-based page and normalize school failures."""
     normalized_type = str(course_type or "").strip().upper()
+    if is_graduate():
+        type_name = graduate_service.CATEGORIES.get(normalized_type, (normalized_type,))[0]
+        try:
+            result = graduate_service.query_catalog(
+                normalized_type, page, cookie=context.cookie if context else None
+            )
+            return True, result.to_course_list_response(), type_name
+        except graduate_service.GraduateSessionExpiredError:
+            return False, SESSION_EXPIRED, type_name
+        except graduate_service.GraduateResponseError:
+            return False, COURSE_RESPONSE_INVALID, type_name
     if page < 0:
         return False, "页码必须大于等于 0", ""
     if normalized_type not in COURSE_TYPE_MAP:

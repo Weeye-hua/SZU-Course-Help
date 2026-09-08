@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260901.1">
+  <link rel="stylesheet" href="/styles.css?build=20260908.1">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -118,6 +118,10 @@
         </div>
       </header>
 
+      <div id="graduateFilters" class="graduate-filters" hidden>
+        <label class="field"><span>开课院系</span><select id="graduateDepartment" aria-label="开课院系"><option value="">全部院系</option></select></label>
+        <label id="graduateOnlyPlanField" class="switch-row" hidden><input id="graduateOnlyPlan" type="checkbox"><span>仅显示培养方案内课程</span></label>
+      </div>
       <section id="courseList" class="course-list" aria-live="polite"></section>
 
       <nav class="pagination" aria-label="课程分页">
@@ -276,10 +280,10 @@
         <button class="dialog-close" value="cancel" aria-label="关闭">×</button>
       </div>
       <div class="confirm-content">
-        <p>仅在复选、正选或补选阶段启动。预选阶段由系统抽签，不应使用自动抢课。</p>
+        <p id="enrollPhaseNotice">仅在复选、正选或补选阶段启动。预选阶段由系统抽签，不应使用自动抢课。</p>
         <label class="check-row">
           <input id="phaseConfirmation" type="checkbox">
-          <span>我已确认当前不是预选阶段</span>
+          <span id="enrollPhaseLabel">我已确认当前不是预选阶段</span>
         </label>
         <div id="enrollMessage" class="form-message" role="status" aria-live="polite"></div>
       </div>
@@ -307,6 +311,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script src="/schedule-parser.js?build=20260901.1" defer></script>
-  <script src="/course-app.js?build=20260901.1" defer></script>
+  <script src="/course-app.js?build=20260908.1" defer></script>
 </body>
 </html>

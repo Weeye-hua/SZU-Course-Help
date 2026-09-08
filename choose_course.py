@@ -60,6 +60,17 @@ def query_enrolled_courses(
 ) -> list[dict[str, Any]]:
     """Return the current student's selected courses from the school system."""
     timestamp = int(time.time() * 1000)
+    from study_program import is_graduate
+
+    if is_graduate():
+        from services import graduate_service
+
+        try:
+            return graduate_service.query_selected(
+                combined_cookie, timeout=timeout or REQUEST_TIMEOUT
+            )
+        except graduate_service.GraduateSessionExpiredError as exc:
+            raise SchoolSessionExpiredError(str(exc)) from exc
     response = _school_request(
         f"elective/courseResult.do?timestamp={timestamp}&studentCode={config.student_id}",
         token=token,
@@ -137,6 +148,12 @@ def submit_course_selection(
     campus_code: str = DEFAULT_CAMPUS_CODE,
 ):
     """Submit one course-selection request using the school's legacy payload."""
+    from study_program import is_graduate
+
+    if is_graduate():
+        from services.graduate_service import submit_selection
+
+        return submit_selection(class_id, teaching_class_type)
     normalized_campus = normalize_campus_code(campus_code)
     form_data = {
         "addParam": (

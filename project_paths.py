@@ -61,6 +61,10 @@ def data_dir() -> Path:
         directory = user_data_dir()
     else:
         directory = application_dir()
+    from study_program import is_graduate
+
+    if is_graduate():
+        directory = directory / "graduate"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

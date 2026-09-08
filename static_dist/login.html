@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>登录 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260901.1">
+  <link rel="stylesheet" href="/styles.css?build=20260908.1">
 </head>
 <body class="login-page">
   <section class="login-visual" aria-label="深大抢课助手">
@@ -27,9 +27,9 @@
   <main class="login-main">
     <div class="login-shell">
       <header class="login-header">
-        <p class="eyebrow">本地安全登录</p>
+        <p id="programLabel" class="eyebrow">本地安全登录</p>
         <h1>进入抢课工作台</h1>
-        <p>获取验证码后，可点击"自动识别"自动填入，或手动点击四个汉字。</p>
+        <p id="loginIntro">获取验证码后，可点击"自动识别"自动填入，或手动点击四个汉字。</p>
       </header>
 
       <form id="loginForm" class="login-form" novalidate>
@@ -68,7 +68,7 @@
 
         <fieldset class="captcha-fieldset">
           <legend>
-            <span>点击验证码</span>
+            <span id="captchaLabel">点击验证码</span>
             <span id="captchaProgress" class="captcha-progress">0 / 4</span>
           </legend>
           <div id="captchaStage" class="captcha-stage" data-state="idle" aria-busy="false" aria-disabled="true">
@@ -79,6 +79,10 @@
               <span id="captchaStatusDetail">正在准备本地登录环境。</span>
             </div>
           </div>
+          <label id="textCaptchaField" class="field" hidden>
+            <span>四位验证码</span>
+            <input id="textCaptcha" name="text_captcha" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="4" placeholder="输入图片中的四位字符">
+          </label>
           <div id="captchaWebvpnAuth" class="captcha-webvpn-auth" hidden>
             <strong>需要 WebVPN 统一认证</strong>
             <span>验证码接口正在等待 WebVPN 登录，请先完成统一认证。</span>
@@ -107,6 +111,6 @@
   </main>
 
   <noscript>此页面需要启用 JavaScript。</noscript>
-  <script src="/login.js?build=20260901.1" defer></script>
+  <script src="/login.js?build=20260908.1" defer></script>
 </body>
 </html>

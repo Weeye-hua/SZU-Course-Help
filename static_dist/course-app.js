@@ -18,6 +18,9 @@ const enrollModeNames = {
 };
 
 const categoryNames = {
+  GPN: "方案内课程",
+  GCROSS: "跨专业课程",
+  GALL: "开课查询",
   TJKC: "本班推荐",
   FANKC: "方案内课程",
   FAWKC: "方案外课程",
@@ -35,6 +38,9 @@ const statusNames = {
 };
 
 const appState = {
+  program: "undergraduate",
+  graduateDepartment: "",
+  graduateOnlyPlan: false,
   type: "TJKC",
   page: 1,
   totalCount: 0,
@@ -219,6 +225,13 @@ function courseRequestUrl(courseType, page, pageSize = 10, { cacheMode = appStat
     page_size: String(pageSize),
   });
   if (cacheMode) params.set("cache_mode", "true");
+  if (appState.program === "graduate") {
+    params.set("keyword", appState.searchKeyword);
+    params.set("department", appState.graduateDepartment);
+    params.set("hide_conflict", String(appState.filters.hideConflict));
+    params.set("hide_full", String(appState.filters.hideFull));
+    params.set("only_plan", String(courseType === "GALL" && appState.graduateOnlyPlan));
+  }
   return `/api/school/courses?${params.toString()}`;
 }
 
@@ -253,6 +266,7 @@ function clearCacheRefreshTimer() {
 }
 
 function isOfflineCacheType(type = appState.type) {
+  if (appState.program === "graduate") return ["GPN", "GCROSS", "GALL"].includes(type);
   return OFFLINE_CACHE_TYPES.has(String(type || "").toUpperCase());
 }
 
@@ -553,7 +567,7 @@ function ensureCartPreferenceRanks() {
   }
   if (changed) {
     try {
-      window.localStorage?.setItem("szu-course-help.cart-preferences.v1", JSON.stringify(appState.cartPreferences));
+      if (appState.program !== "graduate") window.localStorage?.setItem("szu-course-help.cart-preferences.v1", JSON.stringify(appState.cartPreferences));
     } catch {}
   }
 }
@@ -574,7 +588,7 @@ function updateLocalCartPreference(item, values) {
   };
   appState.cartPreferences[String(item.id)] = normalized;
   try {
-    window.localStorage?.setItem("szu-course-help.cart-preferences.v1", JSON.stringify(appState.cartPreferences));
+    if (appState.program !== "graduate") window.localStorage?.setItem("szu-course-help.cart-preferences.v1", JSON.stringify(appState.cartPreferences));
   } catch {}
 }
 
@@ -647,6 +661,7 @@ function syncCampusControl() {
 }
 
 function renderCampusOptions(session = appState.session) {
+  if (appState.program === "graduate") return;
   const options = campusOptions(session);
   const selectedCode = String(session?.campus_code || "01");
   const signature = JSON.stringify([
@@ -919,6 +934,7 @@ function renderState(title, message, options = {}) {
 }
 
 function courseCatalogBlocked() {
+  if (appState.program === "graduate") return appState.catalogBlockedCode === "COURSE_WINDOW_CLOSED";
   return Boolean(
     appState.closedPhase
       || !appState.session?.batch_code
@@ -1014,7 +1030,35 @@ function setPhasePresentation() {
   syncEnrollControls();
 }
 
+function applyProgramPresentation(session) {
+  const graduate = session.program === "graduate";
+  if (graduate && appState.program !== "graduate") {
+    appState.program = "graduate";
+    appState.cartPreferences = {};
+    appState.type = "GPN";
+    appState.page = 1;
+    appElements.courseTypeCode.textContent = "GPN";
+    appElements.courseTitle.textContent = categoryNames.GPN;
+    appElements.categoryList.replaceChildren();
+    for (const [type, label] of [["GPN", "方案内课程"], ["GCROSS", "跨专业课程"], ["GSELECTED", "已选课程"], ["GALL", "开课查询"]]) {
+      const button = element("button", `category-button${type === "GPN" ? " is-active" : ""}`);
+      button.type = "button";
+      button.dataset.type = type;
+      button.append(element("span", "", label));
+      appElements.categoryList.append(button);
+    }
+    appElements.campusSelect.closest("label").hidden = true;
+    document.querySelector("#graduateFilters").hidden = false;
+    document.querySelector("#enrollPhaseNotice").textContent = "研究生选课仅在学校公布的开放时间内运行。";
+    document.querySelector("#enrollPhaseLabel").textContent = "我已确认学校当前开放研究生选课";
+    document.querySelector(".topbar .brand-lockup small").textContent = "研究生选课";
+    const official = document.querySelector("a[href*='bkxk.szu.edu.cn']");
+    if (official) official.href = session.school_url;
+  }
+}
+
 function applySessionData(session) {
+  applyProgramPresentation(session);
   const previousReloginStatus = appState.lastReloginStatus;
   const previousCatalogScope = catalogScopeKey(appState.session);
   const nextCatalogScope = catalogScopeKey(session);
@@ -1056,6 +1100,11 @@ function applySessionData(session) {
   if (session.logged_in && !session.relogin_in_progress) hideSessionDialog();
   updateTaskIndicator();
   setPhasePresentation();
+  if (appState.program === "graduate") {
+    appElements.phaseTitle.textContent = session.batch_name || "研究生选课";
+    appElements.phaseDescription.textContent = [session.phase_message, session.opens_at && session.closes_at ? `${session.opens_at} 至 ${session.closes_at}` : ""].filter(Boolean).join(" · ");
+    appElements.phaseBadge.textContent = session.task_pause_source === "school_window" && session.task_paused ? "任务已暂停" : session.automatic_enroll_allowed ? "开放中" : session.phase === "closed" ? "未开放" : "状态待确认";
+  }
   if (session.task_running) startProgressPolling();
   return catalogContextChanged;
 }
@@ -1252,7 +1301,8 @@ function appendClassRow(container, course, classInfo) {
   capacity.append(element("span", "", "已选 / 容量"));
 
   const actions = element("div", "class-actions");
-  const [tagText, tagClass] = classTag(classInfo);
+  const queryOnly = appState.program === "graduate" && appState.type === "GALL";
+  const [tagText, tagClass] = queryOnly ? ["仅供查询", "tag-full"] : classTag(classInfo);
   const statusTag = classHasConflict(classInfo) && !classIsSelected(classInfo)
     ? element("button", `class-tag ${tagClass} class-tag-button`, tagText)
     : element("span", `class-tag ${tagClass}`, tagText);
@@ -1266,7 +1316,7 @@ function appendClassRow(container, course, classInfo) {
   const alreadyInCart = appState.cart.some(
     (item) => String(item.id) === String(classInfo.teaching_class_id || ""),
   );
-  const blocked = classIsSelected(classInfo) || classHasConflict(classInfo) || alreadyInCart;
+  const blocked = queryOnly || classIsSelected(classInfo) || classHasConflict(classInfo) || alreadyInCart;
   const addButton = element(
     "button",
     "button button-secondary",
@@ -1277,6 +1327,7 @@ function appendClassRow(container, course, classInfo) {
         : (classIsFull(classInfo) ? "加入候补" : "加入清单"),
   );
   addButton.type = "button";
+  if (queryOnly) addButton.textContent = "仅供查询";
   addButton.disabled = blocked || !canMutateQueue();
   if (!blocked && addButton.disabled) {
     addButton.title = appState.session?.task_paused
@@ -1284,6 +1335,7 @@ function appendClassRow(container, course, classInfo) {
       : "请先暂停抢课任务";
   }
   addButton.addEventListener("click", async () => {
+    if (queryOnly) return;
     addButton.disabled = true;
     try {
       const result = await api("/api/courses/add", {
@@ -1292,8 +1344,8 @@ function appendClassRow(container, course, classInfo) {
           id: String(classInfo.teaching_class_id || ""),
           type: appState.type,
           name: `${course.course_name || "未命名课程"} (${classInfo.teacher_name || "教师待定"})`,
-          campus_code: String(appState.session?.campus_code || "01"),
-          campus_name: String(appState.session?.campus_name || course.campus_name || ""),
+          campus_code: appState.program === "graduate" ? "" : String(appState.session?.campus_code || "01"),
+          campus_name: appState.program === "graduate" ? "" : String(appState.session?.campus_name || course.campus_name || ""),
           teaching_place: String(classInfo.teaching_place || ""),
           course_name: String(course.course_name || ""),
           teacher_name: String(classInfo.teacher_name || ""),
@@ -1325,6 +1377,7 @@ function appendClassRow(container, course, classInfo) {
 }
 
 function isFilterActive() {
+  if (appState.program === "graduate") return false;
   return appState.searchKeyword.length > 0;
 }
 
@@ -1698,6 +1751,12 @@ async function runSearchFetch({ force = false, preserveExisting = false, forceLi
 
 async function handleSearchInput() {
   const keyword = appElements.courseSearch.value.trim();
+  if (appState.program === "graduate") {
+    appState.searchKeyword = keyword;
+    appState.page = 1;
+    await loadCourses();
+    return;
+  }
   appState.searchPage = 1;
   if (!keyword) {
     if (isFilterActive()) {
@@ -1749,7 +1808,7 @@ async function loadCourses(options = {}) {
   const requestId = appState.courseRequestId + 1;
   const requestedType = appState.type;
   const requestedPage = appState.page;
-  const requestedKey = `${requestedType}:${requestedPage}`;
+  const requestedKey = appState.program === "graduate" ? courseRequestUrl(requestedType, requestedPage) : `${requestedType}:${requestedPage}`;
   const preserveExisting = Boolean(options.preserveExisting);
   const hasCurrentResult = appState.courseDataKey === requestedKey;
   appState.courseRequestController = controller;
@@ -1782,7 +1841,7 @@ async function loadCourses(options = {}) {
     const courses = data.full_catalog
       ? allCourses.slice((requestedPage - 1) * 10, requestedPage * 10)
       : allCourses;
-    if (preserveExisting && !courses.length && hasCurrentResult) {
+    if (appState.program !== "graduate" && preserveExisting && !courses.length && hasCurrentResult) {
       appElements.courseSummary.textContent = "实时刷新返回空列表，仍显示上次成功结果";
       return;
     }
@@ -2205,6 +2264,10 @@ async function loadCart() {
     }
     renderCart();
     renderMyCoursesSchedule();
+    if (data.timetable_warning) {
+      appElements.myCoursesHint.textContent += `；${data.timetable_warning}`;
+      if (!silent) showToast(data.timetable_warning, true);
+    }
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
   }
@@ -2543,7 +2606,7 @@ function renderMyCoursesSchedule() {
 
     const label = element("div", "schedule-row-label" + (isBreak ? " is-break" : ""));
     label.append(element("strong", "", String(p)));
-    label.append(element("small", "", PERIODS[p - 1].timeLabel));
+    if (appState.program !== "graduate") label.append(element("small", "", PERIODS[p - 1].timeLabel));
     label.style.gridRow = String(row);
     label.style.gridColumn = "1";
     grid.append(label);
@@ -2992,11 +3055,17 @@ async function startEnrollment() {
 
 appElements.categoryList.addEventListener("click", (event) => {
   const button = event.target.closest("[data-type]");
+  if (button?.dataset.type === "GSELECTED") {
+    appState.myCoursesView = "list";
+    appElements.openMyCourses.click();
+    return;
+  }
   if (!button || button.dataset.type === appState.type) return;
   for (const item of appElements.categoryList.querySelectorAll("[data-type]")) {
     item.classList.toggle("is-active", item === button);
   }
   appState.type = button.dataset.type;
+  if (appState.program === "graduate") document.querySelector("#graduateOnlyPlanField").hidden = appState.type !== "GALL";
   appState.page = 1;
   appState.searchKeyword = "";
   appState.searchResults = [];
@@ -3019,6 +3088,7 @@ appElements.courseSearch.addEventListener("input", () => {
 appElements.filterConflictSwitch.addEventListener("change", () => {
   appState.filters.hideConflict = appElements.filterConflictSwitch.checked;
   saveFilterPreferences();
+  if (appState.program === "graduate") { appState.page = 1; loadCourses(); return; }
   if (isFilterActive()) applyCourseFilter();
   renderCourses();
   updatePagination();
@@ -3026,6 +3096,7 @@ appElements.filterConflictSwitch.addEventListener("change", () => {
 appElements.filterFullSwitch.addEventListener("change", () => {
   appState.filters.hideFull = appElements.filterFullSwitch.checked;
   saveFilterPreferences();
+  if (appState.program === "graduate") { appState.page = 1; loadCourses(); return; }
   if (isFilterActive()) applyCourseFilter();
   renderCourses();
   updatePagination();
@@ -3143,6 +3214,17 @@ for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
 
 window.addEventListener?.("pagehide", clearCacheRefreshTimer);
 
+document.querySelector("#graduateDepartment")?.addEventListener("change", (event) => {
+  appState.graduateDepartment = event.target.value;
+  appState.page = 1;
+  loadCourses();
+});
+document.querySelector("#graduateOnlyPlan")?.addEventListener("change", (event) => {
+  appState.graduateOnlyPlan = event.target.checked;
+  appState.page = 1;
+  loadCourses();
+});
+
 async function initializeApp() {
   stripUiQuery();
   try {
@@ -3150,6 +3232,17 @@ async function initializeApp() {
     if (saved && typeof saved === "object") appState.cartPreferences = saved;
   } catch {}
   await loadSession(false);
+  if (appState.program === "graduate" && appState.session?.logged_in) {
+    try {
+      const data = await api("/api/school/departments");
+      const select = document.querySelector("#graduateDepartment");
+      for (const item of data.departments || []) {
+        const option = element("option", "", item.name);
+        option.value = item.code;
+        select.append(option);
+      }
+    } catch (error) { showToast(`院系筛选暂不可用：${error.message}`, true); }
+  }
   if (appState.session?.logged_in) {
     try { applyEnrollSettings(await planApi("/api/enroll/settings")); } catch (error) {
       if (error.status !== 404) showToast(`抢课设置读取失败：${planErrorMessage(error)}`, true);

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 
@@ -12,7 +13,8 @@ from security.key_manager import (
     get_or_create_key_pair,
     get_public_key_fingerprint,
 )
-from services.data_migration import migrate_legacy_runtime_data
+from services.data_migration import MigrationResult, migrate_legacy_runtime_data
+from study_program import GRADUATE, PROGRAM_ENV, UNDERGRADUATE, current_program, is_graduate
 
 STUDENT_ID_PATTERN = re.compile(r"^\d{6,12}$")
 STUDENT_ID_FORMAT_HINT = "纯数字，长度 6 至 12 位"
@@ -59,6 +61,19 @@ def read_student_id() -> str:
         print(f"学号格式无效，要求为{STUDENT_ID_FORMAT_HINT}。")
 
 
+def select_study_program() -> str:
+    """Select once before importing services that own school sessions or data."""
+    if os.getenv(PROGRAM_ENV, "").strip():
+        return current_program()
+    while True:
+        choice = safe_input("\n请选择选课系统 [1 本科生 / 2 研究生]（默认 1）: ")
+        if choice in {"", "1", "2"}:
+            program = GRADUATE if choice == "2" else UNDERGRADUATE
+            os.environ[PROGRAM_ENV] = program
+            return program
+        print("请输入 1 或 2。")
+
+
 def issue_card_key() -> tuple[str, str]:
     """Issue and display one student-bound card key at startup."""
     student_id = read_student_id()
@@ -95,7 +110,11 @@ def start_course_system(student_id: str, card_key: str) -> None:
     app.configure_runtime_prefill(student_id, card_key)
     print("\n正在启动本地选课界面...")
     print(f"访问地址: {app.get_login_url()}")
-    print("当前为预选阶段时，请只浏览和整理课程，不要启动抢课。")
+    print(
+        "当前模式：研究生；按学校开放时间和选课策略启用抢课。"
+        if is_graduate()
+        else "当前为预选阶段时，请只浏览和整理课程，不要启动抢课。"
+    )
     print("保持本终端窗口开启。\n")
     print_separator("-")
     app.start_server()
@@ -105,8 +124,9 @@ def main() -> None:
     """Generate a card key first, then optionally enter the Web UI."""
     configure_logging()
     print_banner()
+    select_study_program()
     try:
-        migration = migrate_legacy_runtime_data()
+        migration = MigrationResult() if is_graduate() else migrate_legacy_runtime_data()
     except (OSError, TimeoutError) as exc:
         print(f"\n旧版数据迁移失败: {exc}")
         print("为避免覆盖卡密或课程清单，程序已停止；请检查数据目录权限后重试。")
