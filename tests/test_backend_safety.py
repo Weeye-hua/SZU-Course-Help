@@ -158,7 +158,9 @@ def test_school_login_stays_on_primary_and_excludes_webvpn_cookie(monkeypatch):
     assert "_webvpn_key" not in captured["cookie"]
 
 
-def test_captcha_token_request_is_pinned_to_primary(monkeypatch):
+def test_captcha_token_request_follows_selected_backend(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_WEBVPN)
     captured = {}
 
     class Response:
@@ -180,8 +182,70 @@ def test_captcha_token_request_is_pinned_to_primary(monkeypatch):
 
     assert logic.get_vtoken() == "vtoken"
     assert captured["read_only"] is True
-    assert captured["preference"] == config.BACKEND_PRIMARY
+    assert captured["preference"] == config.BACKEND_WEBVPN
     assert captured["omit_cookie"] is True
+
+
+def test_captcha_token_and_image_use_webvpn_urls(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_WEBVPN)
+    calls = []
+
+    class TokenResponse:
+        status_code = 200
+        text = '{"data":{"token":"vtoken"}}'
+
+        @staticmethod
+        def json():
+            return {"data": {"token": "vtoken"}}
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class ImageResponse:
+        status_code = 200
+        content = b"\xff\xd8\xff\x00" + b"0" * 16
+        headers = {
+            "Set-Cookie": "route=fresh; insert_cookie=fresh; Path=/",
+            "Content-Type": "image/jpeg",
+        }
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    def fake_post(**kwargs):
+        calls.append(kwargs)
+        return TokenResponse()
+
+    def fake_get(**kwargs):
+        calls.append(kwargs)
+        return ImageResponse()
+
+    monkeypatch.setattr(logic.requests, "post", fake_post)
+    monkeypatch.setattr(logic.requests, "get", fake_get)
+
+    result = logic._fetch_vtoken_and_image_once()
+
+    assert result["vtoken"] == "vtoken"
+    assert len(calls) == 2
+    assert calls[0]["url"].startswith(
+        "https://bkxk.webvpn.szu.edu.cn/xsxkapp/sys/xsxkapp/student/4/vcode.do?timestamp="
+    )
+    assert calls[1]["url"] == (
+        "https://bkxk.webvpn.szu.edu.cn/xsxkapp/sys/xsxkapp/student/vcode/image.do?vtoken=vtoken"
+    )
+    assert all(call["headers"]["Host"] == "bkxk.webvpn.szu.edu.cn" for call in calls)
+    assert all(call["headers"]["Origin"] == "https://bkxk.webvpn.szu.edu.cn" for call in calls)
+    assert all(
+        call["headers"]["Referer"].startswith("https://bkxk.webvpn.szu.edu.cn/") for call in calls
+    )
+    assert all(
+        call["headers"]["Cookie"]
+        == "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig"
+        for call in calls
+    )
 
 
 @pytest.mark.parametrize("existing_cookie", ["route=expired; JSESSIONID=stale", ""])
@@ -274,7 +338,7 @@ def test_get_new_image_requests_cookie_omission(monkeypatch):
         return ImageResponse()
 
     monkeypatch.setattr(config, "combined_cookie", "route=expired; JSESSIONID=stale")
-    monkeypatch.setattr(logic, "get_vtoken", lambda: "vtoken")
+    monkeypatch.setattr(logic, "get_vtoken", lambda **_kwargs: "vtoken")
     monkeypatch.setattr(backend_service, "request_with_failover", request_with_failover)
 
     _vtoken, cookie = logic.get_new_image()

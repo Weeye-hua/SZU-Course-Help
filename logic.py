@@ -963,13 +963,20 @@ def _parse_captcha_token_response(response: requests.Response) -> str:
     return token.strip()
 
 
-def get_vtoken() -> str:
+def _captcha_backend_preference(preference: str | None = None) -> str:
+    """Resolve one explicit backend for a complete captcha round."""
+    selected = backend_service.normalize_preference(preference or backend_service.get_preference())
+    return config.BACKEND_WEBVPN if selected == config.BACKEND_WEBVPN else config.BACKEND_PRIMARY
+
+
+def get_vtoken(*, preference: str | None = None) -> str:
+    selected_preference = _captcha_backend_preference(preference)
     time_stamp = int(time.time() * 1000)
     response = _school_request(
         "POST",
         f"student/4/vcode.do?timestamp={time_stamp}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=selected_preference,
         omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
@@ -990,12 +997,13 @@ def _validate_captcha_image(image_data: bytes, content_type: str = "") -> None:
 
 
 def get_new_image() -> tuple[str, str]:
-    vtoken = get_vtoken()
+    preference = _captcha_backend_preference()
+    vtoken = get_vtoken(preference=preference)
     response = _school_request(
         "GET",
         f"student/vcode/image.do?vtoken={vtoken}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=preference,
         omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
@@ -1014,12 +1022,13 @@ def get_new_image() -> tuple[str, str]:
 
 
 def _fetch_vtoken_and_image_once() -> dict[str, str]:
+    preference = _captcha_backend_preference()
     timestamp = int(time.time() * 1000)
     token_response = _school_request(
         "POST",
         f"student/4/vcode.do?timestamp={timestamp}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=preference,
         omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
         accept="application/json, text/javascript, */*; q=0.01",
@@ -1030,7 +1039,7 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
         "GET",
         f"student/vcode/image.do?vtoken={vtoken}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=preference,
         omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
         accept="application/json, text/javascript, */*; q=0.01",

@@ -208,6 +208,32 @@ def test_card_key_is_terminal_prefilled_and_has_no_web_issuance_endpoint():
         app.configure_runtime_prefill("", "")
 
 
+def test_captcha_api_applies_requested_webvpn_backend(monkeypatch):
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_PRIMARY)
+    monkeypatch.setattr(
+        config,
+        "webvpn_cookie",
+        "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+    )
+    observed = {}
+
+    def fake_fetch(max_attempts):
+        observed["max_attempts"] = max_attempts
+        observed["preference"] = config.backend_preference
+        return {
+            "vtoken": "vtoken",
+            "cookie": "route=fresh; insert_cookie=fresh",
+            "imageUrl": "data:image/jpeg;base64,/9j/",
+        }
+
+    monkeypatch.setattr(app.logic, "fetch_vtoken_and_image", fake_fetch)
+
+    response = client.get("/api/captcha?backend=webvpn")
+
+    assert response.status_code == 200
+    assert observed == {"max_attempts": 1, "preference": config.BACKEND_WEBVPN}
+
+
 def test_captcha_api_reports_closed_window_without_generic_502(monkeypatch):
     monkeypatch.setattr(
         app.logic,
