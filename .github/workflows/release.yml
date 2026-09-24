@@ -8,13 +8,40 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     name: Validate release source
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
 
     steps:
+      - name: Cancel older builds of the same release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          gh api "repos/${GH_REPO}/actions/workflows/release.yml/runs?per_page=100" \
+            | jq --arg tag "${RELEASE_TAG}" --argjson current "${RELEASE_RUN_ID}" \
+              '.workflow_runs[] | select(.head_branch == $tag and .id < $current and .status != "completed") | .id' \
+            > older-release-runs.txt
+          while IFS= read -r run_id; do
+            echo "Cancelling superseded release run ${run_id}"
+            if ! gh api --method POST "repos/${GH_REPO}/actions/runs/${run_id}/cancel"; then
+              state=$(gh api "repos/${GH_REPO}/actions/runs/${run_id}" --jq '.status')
+              [ "${state}" = "completed" ] || exit 1
+            fi
+          done < older-release-runs.txt
+
       - name: Check out release tag
         uses: actions/checkout@v6
 
@@ -149,6 +176,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          tag_commit=$(git ls-remote origin "refs/tags/${GITHUB_REF_NAME}^{}" | cut -f1)
+          if [ -z "${tag_commit}" ]; then
+            tag_commit=$(git ls-remote origin "refs/tags/${GITHUB_REF_NAME}" | cut -f1)
+          fi
+          if [ "${tag_commit}" != "${GITHUB_SHA}" ]; then
+            echo "Release tag moved; refusing to publish stale artifacts"
+            exit 1
+          fi
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release edit "${GITHUB_REF_NAME}" \
               --title "SZU Course Help ${GITHUB_REF_NAME}" \

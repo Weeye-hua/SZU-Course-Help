@@ -11,8 +11,9 @@ from math import isfinite
 BEIJING = timezone(timedelta(hours=8), "Asia/Shanghai")
 MAX_SAMPLE_AGE_SECONDS = 600
 MAX_REQUEST_SECONDS = 10
+MAX_WALL_DRIFT_SECONDS = 10
 _lock = threading.Lock()
-_sample: tuple[datetime, float, float] | None = None
+_sample: tuple[datetime, float, float, float] | None = None
 
 
 def observe(
@@ -43,7 +44,7 @@ def observe(
     with _lock:
         global _sample
         if _sample is None or sent_at >= _sample[2]:
-            _sample = (server_time, received_at, sent_at)
+            _sample = (server_time, received_at, sent_at, time.time())
 
 
 def reset() -> None:
@@ -58,6 +59,12 @@ def now() -> tuple[datetime, str]:
         sample = _sample
     if sample:
         elapsed = time.monotonic() - sample[1]
-        if 0 <= elapsed <= MAX_SAMPLE_AGE_SECONDS:
+        wall_elapsed = time.time() - sample[3]
+        # Some OS monotonic clocks exclude suspend time. Also invalidate
+        # samples after a significant system-clock adjustment.
+        if (
+            0 <= elapsed <= MAX_SAMPLE_AGE_SECONDS
+            and abs(wall_elapsed - elapsed) <= MAX_WALL_DRIFT_SECONDS
+        ):
             return sample[0] + timedelta(seconds=elapsed), "school"
     return datetime.now(UTC), "local"

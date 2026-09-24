@@ -128,6 +128,18 @@ def test_clock_ignores_late_older_request(monkeypatch):
     assert school_clock.now() == (NOW + timedelta(seconds=1), "school")
 
 
+@pytest.mark.parametrize("wall_change", [1800, -1800])
+def test_clock_discards_sample_after_suspend_or_system_time_jump(monkeypatch, wall_change):
+    clock = {"wall": 10000.0, "mono": 100.0}
+    monkeypatch.setattr(school_clock.time, "time", lambda: clock["wall"])
+    monkeypatch.setattr(school_clock.time, "monotonic", lambda: clock["mono"])
+    school_clock.observe(format_datetime(NOW), 100, sent_at=99)
+    assert school_clock.now()[1] == "school"
+    clock["wall"] += wall_change
+    clock["mono"] += 1
+    assert school_clock.now()[1] == "local"
+
+
 @pytest.mark.parametrize(
     "value",
     [
