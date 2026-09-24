@@ -158,7 +158,9 @@ def test_school_login_stays_on_primary_and_excludes_webvpn_cookie(monkeypatch):
     assert "_webvpn_key" not in captured["cookie"]
 
 
-def test_captcha_token_request_is_pinned_to_primary(monkeypatch):
+def test_captcha_token_request_follows_selected_backend(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_WEBVPN)
     captured = {}
 
     class Response:
@@ -180,8 +182,70 @@ def test_captcha_token_request_is_pinned_to_primary(monkeypatch):
 
     assert logic.get_vtoken() == "vtoken"
     assert captured["read_only"] is True
-    assert captured["preference"] == config.BACKEND_PRIMARY
+    assert captured["preference"] == config.BACKEND_WEBVPN
     assert captured["omit_cookie"] is True
+
+
+def test_captcha_token_and_image_use_webvpn_urls(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_WEBVPN)
+    calls = []
+
+    class TokenResponse:
+        status_code = 200
+        text = '{"data":{"token":"vtoken"}}'
+
+        @staticmethod
+        def json():
+            return {"data": {"token": "vtoken"}}
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class ImageResponse:
+        status_code = 200
+        content = b"\xff\xd8\xff\x00" + b"0" * 16
+        headers = {
+            "Set-Cookie": "route=fresh; insert_cookie=fresh; Path=/",
+            "Content-Type": "image/jpeg",
+        }
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    def fake_post(**kwargs):
+        calls.append(kwargs)
+        return TokenResponse()
+
+    def fake_get(**kwargs):
+        calls.append(kwargs)
+        return ImageResponse()
+
+    monkeypatch.setattr(logic.requests, "post", fake_post)
+    monkeypatch.setattr(logic.requests, "get", fake_get)
+
+    result = logic._fetch_vtoken_and_image_once()
+
+    assert result["vtoken"] == "vtoken"
+    assert len(calls) == 2
+    assert calls[0]["url"].startswith(
+        "https://bkxk.webvpn.szu.edu.cn/xsxkapp/sys/xsxkapp/student/4/vcode.do?timestamp="
+    )
+    assert calls[1]["url"] == (
+        "https://bkxk.webvpn.szu.edu.cn/xsxkapp/sys/xsxkapp/student/vcode/image.do?vtoken=vtoken"
+    )
+    assert all(call["headers"]["Host"] == "bkxk.webvpn.szu.edu.cn" for call in calls)
+    assert all(call["headers"]["Origin"] == "https://bkxk.webvpn.szu.edu.cn" for call in calls)
+    assert all(
+        call["headers"]["Referer"].startswith("https://bkxk.webvpn.szu.edu.cn/") for call in calls
+    )
+    assert all(
+        call["headers"]["Cookie"]
+        == "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig"
+        for call in calls
+    )
 
 
 @pytest.mark.parametrize("existing_cookie", ["route=expired; JSESSIONID=stale", ""])
@@ -274,7 +338,7 @@ def test_get_new_image_requests_cookie_omission(monkeypatch):
         return ImageResponse()
 
     monkeypatch.setattr(config, "combined_cookie", "route=expired; JSESSIONID=stale")
-    monkeypatch.setattr(logic, "get_vtoken", lambda: "vtoken")
+    monkeypatch.setattr(logic, "get_vtoken", lambda **_kwargs: "vtoken")
     monkeypatch.setattr(backend_service, "request_with_failover", request_with_failover)
 
     _vtoken, cookie = logic.get_new_image()
@@ -354,3 +418,176 @@ def test_school_login_without_captcha_cookie_omits_the_header(monkeypatch):
     logic.login("2024110122", "vtoken", "encrypted", "1-2,3-4,5-6,7-8", "")
 
     assert "Cookie" not in captured["headers"]
+
+
+@pytest.mark.parametrize(
+    "status_code,headers,body",
+    [
+        (302, {"Location": "https://webvpn.szu.edu.cn/users/sign_in"}, ""),
+        (302, {"Location": "https://authserver-443.webvpn.szu.edu.cn/authserver/login"}, ""),
+        (
+            200,
+            {"Content-Type": "text/html"},
+            '<html>WebVPN 统一认证 <input type="password"></html>',
+        ),
+    ],
+)
+def test_expired_gateway_stops_captcha_retries_and_clears_only_gateway(
+    monkeypatch,
+    status_code,
+    headers,
+    body,
+):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "backend_preference", "webvpn")
+    monkeypatch.setattr(config, "authserver_cookie", "CASTGC=old")
+    calls = []
+
+    def sender(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status_code=status_code, headers=headers, text=body)
+
+    monkeypatch.setattr(requests, "post", sender)
+    with pytest.raises(backend_service.WebVPNAuthenticationRequiredError):
+        logic.fetch_vtoken_and_image(max_attempts=50)
+    assert len(calls) == 1
+    assert calls[0]["allow_redirects"] is False
+    assert config.webvpn_cookie == ""
+    assert config.authserver_cookie == ""
+    assert config.combined_cookie == "route=school"
+
+
+def test_old_gateway_error_does_not_invalidate_new_authorization(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    original = config.webvpn_cookie
+
+    def sender(**kwargs):
+        config.webvpn_cookie = original.replace("key=key", "key=new")
+        return SimpleNamespace(
+            status_code=302, headers={"Location": "https://webvpn.szu.edu.cn/"}, text=""
+        )
+
+    with pytest.raises(backend_service.WebVPNAuthenticationRequiredError):
+        backend_service.request_with_failover(
+            "GET", "student/vcode/image.do", preference="webvpn", sender=sender
+        )
+    assert "key=new" in config.webvpn_cookie
+    assert backend_service.has_webvpn_cookies()
+
+
+def test_school_expiry_is_not_mistaken_for_gateway_expiry(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    result = SimpleNamespace(status_code=401, headers={}, text='{"code":"-1","msg":"登录过期"}')
+    assert (
+        backend_service.request_with_failover(
+            "POST",
+            "elective/courseResult.do",
+            preference="webvpn",
+            read_only=True,
+            sender=lambda **_: result,
+        )
+        is result
+    )
+    assert backend_service.has_webvpn_cookies()
+
+
+def test_unexpected_webvpn_redirect_is_not_followed(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    calls = []
+
+    def sender(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            status_code=307, headers={"Location": "https://example.invalid/"}, text=""
+        )
+
+    with pytest.raises(requests.HTTPError):
+        backend_service.request_with_failover(
+            "GET", "student/vcode/image.do", preference="webvpn", sender=sender
+        )
+    assert len(calls) == 1
+    assert calls[0]["allow_redirects"] is False
+
+
+def test_gateway_auth_error_does_not_loop_through_fifty_ocr_images(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "2024000000")
+    monkeypatch.setattr(config, "password", "offline-only")
+    calls = []
+
+    def unavailable(*args, **kwargs):
+        calls.append(1)
+        raise backend_service.WebVPNAuthenticationRequiredError("gateway expired")
+
+    monkeypatch.setattr(logic, "fetch_vtoken_and_image", unavailable)
+    with pytest.raises(backend_service.WebVPNAuthenticationRequiredError):
+        logic.verify_vcode_login_flow(50)
+    assert calls == [1]
+
+
+def test_captcha_round_keeps_backend_when_global_preference_changes(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "backend_preference", "webvpn")
+    calls = []
+
+    def post(**kwargs):
+        calls.append(kwargs)
+        config.backend_preference = "primary"
+        return SimpleNamespace(
+            status_code=200,
+            headers={},
+            text="",
+            json=lambda: {"data": {"token": "vtoken"}},
+            raise_for_status=lambda: None,
+        )
+
+    def get(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            status_code=200,
+            headers={"Content-Type": "image/jpeg", "Set-Cookie": "route=fresh"},
+            content=b"\xff\xd8\xff\x00",
+            raise_for_status=lambda: None,
+        )
+
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "get", get)
+    assert logic.fetch_vtoken_and_image(1)["vtoken"] == "vtoken"
+    assert all("bkxk.webvpn.szu.edu.cn" in call["url"] for call in calls)
+
+
+@pytest.mark.parametrize("flow", [logic.verify_vcode, logic.verify_vcode_login_flow])
+def test_automatic_ocr_stays_on_primary_even_when_manual_preference_is_webvpn(monkeypatch, flow):
+    monkeypatch.setattr(config, "backend_preference", "webvpn")
+    monkeypatch.setattr(config, "student_id", "2024000000")
+    monkeypatch.setattr(config, "password", "offline-only")
+    calls = []
+
+    def post(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            status_code=200,
+            headers={},
+            text="",
+            json=lambda: {"data": {"token": "vtoken"}},
+            raise_for_status=lambda: None,
+        )
+
+    def get(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            status_code=200,
+            headers={"Content-Type": "image/jpeg", "Set-Cookie": "route=fresh"},
+            content=b"\xff\xd8\xff\x00",
+            raise_for_status=lambda: None,
+        )
+
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(
+        logic, "recognize_captcha_centers", lambda: [[1, 2], [3, 4], [5, 6], [7, 8]]
+    )
+    assert flow(max_attempts=1)[0] == "vtoken"
+    assert len(calls) == 2
+    assert all("http://bkxk.szu.edu.cn/" in call["url"] for call in calls)
+    assert all("Cookie" not in call["headers"] for call in calls)
+    assert config.backend_preference == "webvpn"

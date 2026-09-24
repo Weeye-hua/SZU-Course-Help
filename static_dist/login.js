@@ -22,6 +22,7 @@ const loginState = {
   loadingCaptcha: false,
   solvingCaptcha: false,
   submitting: false,
+  selectingBackend: false,
   backend: "auto",
   prefilledStudentId: "",
   cardKey: "",
@@ -83,12 +84,19 @@ function setBackendPresentation(payload = {}) {
   const webvpnReady = Boolean(payload.webvpn_authenticated || payload.authenticated);
   const authNeeded = Boolean(payload.requires_webvpn_auth) || loginState.webvpnAuthRequested;
   loginElements.webvpnAuthButton.hidden = (!authNeeded && preference !== "webvpn") || webvpnReady;
-  if (webvpnReady) loginElements.webvpnAuthButton.textContent = "WebVPN 已认证";
+  loginElements.webvpnAuthButton.textContent = webvpnReady ? "WebVPN 已认证" : "完成 WebVPN 统一认证";
 }
 
 async function selectBackend(value) {
+  if (loginState.loadingCaptcha || loginState.submitting || loginState.solvingCaptcha || loginState.selectingBackend) return;
+  const previous = loginState.backend;
+  loginState.selectingBackend = true;
   loginState.backend = value;
   loginState.webvpnAuthRequested = value === "webvpn";
+  loginState.captcha = null;
+  clearCaptchaPoints();
+  clearCaptchaImage();
+  updateLoginControls();
   if (value === "webvpn") {
     // Clear the previous primary-server captcha immediately.  Otherwise the
     // old image remains visible while the backend-selection request is in
@@ -124,17 +132,29 @@ async function selectBackend(value) {
     }
     await loadCaptcha();
   } catch (error) {
+    if (error?.code === "WEBVPN_AUTH_REQUIRED") {
+      setBackendPresentation({ preference: value, requires_webvpn_auth: true });
+    } else {
+      loginState.backend = previous;
+      const radio = document.querySelector(`input[name='backend'][value='${previous}']`);
+      if (radio) radio.checked = true;
+      setCaptchaStatus("error", "入口切换未完成", error.message || "请稍后重试");
+    }
     setLoginMessage(error instanceof Error ? error.message : "后端切换失败");
+  } finally {
+    loginState.selectingBackend = false;
+    updateLoginControls();
   }
 }
 
 function updateLoginControls() {
   const captchaReady = loginState.captchaStatus === "ready" && Boolean(loginState.captcha);
-  const busy = loginState.loadingCaptcha || loginState.submitting || loginState.solvingCaptcha;
+  const busy = loginState.loadingCaptcha || loginState.submitting || loginState.solvingCaptcha || loginState.selectingBackend;
+  for (const radio of document.querySelectorAll("input[name='backend']")) radio.disabled = busy;
   loginElements.refresh.disabled = busy;
   loginElements.undo.disabled = busy || !captchaReady || loginState.points.length === 0;
   loginElements.solveCaptcha.disabled = busy || !captchaReady;
-  loginElements.submit.disabled = loginState.submitting || loginState.solvingCaptcha || !captchaReady;
+  loginElements.submit.disabled = busy || !captchaReady;
   loginElements.solveCaptcha.textContent = loginState.solvingCaptcha ? "识别中…" : "自动识别";
   const textInput = document.querySelector("#textCaptcha");
   if (textInput) textInput.disabled = busy || !captchaReady;
@@ -160,8 +180,7 @@ function prefilledCardKeyForStudent(studentId) {
 
 function setCaptchaStatus(status, title = "", detail = "") {
   const fallback = captchaStatusCopy[status] || captchaStatusCopy.error;
-  const webvpnFallback = status === "webvpn-auth-required"
-    || (loginState.backend === "webvpn" && status !== "ready" && status !== "loading");
+  const webvpnFallback = status === "webvpn-auth-required";
   loginState.captchaStatus = status;
   loginElements.stage.dataset.state = status;
   loginElements.stage.hidden = webvpnFallback;
@@ -177,7 +196,7 @@ function setCaptchaStatus(status, title = "", detail = "") {
   if (webvpnFallback) {
     const detailElement = loginElements.captchaWebvpnAuth.querySelector("span");
     if (detailElement) {
-      detailElement.textContent = "当前选择 WebVPN，但验证码暂时无法获取。请先完成统一认证后重试。";
+      detailElement.textContent = detail || "WebVPN 授权已过期或尚未完成，请重新统一认证。";
     }
   }
   loginElements.refresh.textContent = status === "ready" ? "刷新验证码" : "重新获取验证码";
@@ -463,8 +482,9 @@ async function loadCaptcha() {
   } catch (error) {
     loginState.captcha = null;
     clearCaptchaImage();
-    if (loginState.backend === "webvpn" || error?.code === "WEBVPN_AUTH_REQUIRED") {
+    if (error?.code === "WEBVPN_AUTH_REQUIRED") {
       loginElements.webvpnAuthButton.hidden = false;
+      loginElements.webvpnAuthButton.textContent = "重新完成 WebVPN 统一认证";
     }
     const failure = describeCaptchaFailure(error);
     loginState.captchaFailureMessage = failure.message;
@@ -496,7 +516,7 @@ async function pollWebvpnAuth() {
       await loadCaptcha();
       return;
     }
-    if (payload.state === "error") {
+    if (payload.state === "error" || payload.state === "expired") {
       loginElements.webvpnAuthButton.textContent = "重新完成 WebVPN 统一认证";
       setLoginMessage(payload.message || "WebVPN 认证未完成");
       return;

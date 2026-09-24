@@ -100,7 +100,7 @@ from study_program import is_graduate, program_payload
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
 RUNTIME_PORT_ENV = "COURSE_SELECT_RUNTIME_PORT"
-UI_ASSET_BUILD = "20260908.1"
+UI_ASSET_BUILD = "20260924.1"
 logger = logging.getLogger(__name__)
 OFFICIAL_SCHOOL_HOME_URL = program_payload()["school_url"]
 
@@ -151,7 +151,7 @@ LOCAL_ORIGINS = (
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.7.0")
+app = FastAPI(title="深大抢课助手 API", version="3.7.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
@@ -713,7 +713,7 @@ async def api_captcha(backend: str | None = Query(default=None)):
     except backend_service.WebVPNAuthenticationRequiredError:
         return _api_error(
             409,
-            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            backend_service.WEBVPN_AUTH_MESSAGE,
             "WEBVPN_AUTH_REQUIRED",
             retryable=True,
         )
@@ -832,6 +832,10 @@ async def api_captcha_solve(payload: dict):
                 current_vtoken = fresh["vtoken"]
                 current_cookie = fresh["cookie"]
                 current_image_url = fresh["imageUrl"]
+            except backend_service.WebVPNAuthenticationRequiredError:
+                return _api_error(
+                    409, backend_service.WEBVPN_AUTH_MESSAGE, "WEBVPN_AUTH_REQUIRED", retryable=True
+                )
             except Exception as exc:
                 logger.warning("Failed to fetch fresh captcha for retry: %s", exc)
                 break
@@ -917,7 +921,7 @@ async def api_session_refresh():
     except backend_service.WebVPNAuthenticationRequiredError:
         return _api_error(
             409,
-            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            backend_service.WEBVPN_AUTH_MESSAGE,
             "WEBVPN_AUTH_REQUIRED",
             retryable=True,
         )
@@ -1453,7 +1457,7 @@ async def api_school_courses(
     except backend_service.WebVPNAuthenticationRequiredError:
         return _api_error(
             409,
-            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            backend_service.WEBVPN_AUTH_MESSAGE,
             "WEBVPN_AUTH_REQUIRED",
             retryable=True,
         )
@@ -1526,7 +1530,7 @@ async def api_school_enrolled():
     except backend_service.WebVPNAuthenticationRequiredError:
         return _api_error(
             409,
-            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            backend_service.WEBVPN_AUTH_MESSAGE,
             "WEBVPN_AUTH_REQUIRED",
             retryable=True,
         )

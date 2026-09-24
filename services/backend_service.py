@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -46,6 +47,31 @@ class BackendProfile:
 
 class WebVPNAuthenticationRequiredError(RuntimeError):
     """Raised when a WebVPN request has no authenticated WebVPN cookie set."""
+
+
+WEBVPN_AUTH_MESSAGE = "WebVPN 统一认证未完成或已过期，请重新认证；通常也可切回主站直连"
+
+
+def _gateway_login_response(response: Any, profile: BackendProfile) -> bool:
+    headers = getattr(response, "headers", {}) or {}
+    location = str(headers.get("Location", "") or "")
+    host = urlsplit(urljoin(profile.base_url, location)).hostname if location else ""
+    if host in {WEBVPN_ROOT_HOST, AUTHSERVER_HOST, "authserver.szu.edu.cn"}:
+        return True
+    text = str(getattr(response, "text", "") or "")[:32768].lower()
+    # A school-session expiry alone is not a gateway expiry.
+    return ("webvpn" in text or AUTHSERVER_HOST in text) and any(
+        marker in text
+        for marker in (
+            "统一认证",
+            "扫码",
+            "未登录",
+            "认证过期",
+            "cas/login",
+            'type="password"',
+            "type='password'",
+        )
+    )
 
 
 BACKENDS: dict[str, BackendProfile] = {
@@ -251,7 +277,8 @@ def request_with_failover(
     normalized_path = str(path).lstrip("/")
     for index, profile in enumerate(profiles):
         if profile.key == config.BACKEND_WEBVPN and not has_webvpn_cookies():
-            raise WebVPNAuthenticationRequiredError("WebVPN authentication is required")
+            raise WebVPNAuthenticationRequiredError(WEBVPN_AUTH_MESSAGE)
+        gateway_snapshot = str(config.webvpn_cookie or "")
         try:
             # A school-cookie omission must not drop the WebVPN gateway cookie:
             # it authenticates the gateway itself, not the school session
@@ -274,6 +301,7 @@ def request_with_failover(
                     extra=extra_headers,
                 ),
                 timeout=timeout,
+                **({"allow_redirects": False} if profile.key == config.BACKEND_WEBVPN else {}),
             )
         except requests.RequestException as exc:
             last_error = exc
@@ -282,6 +310,17 @@ def request_with_failover(
                 logger.warning("Backend %s unavailable; trying fallback", profile.label)
                 continue
             raise
+        if profile.key == config.BACKEND_WEBVPN:
+            if _gateway_login_response(response, profile):
+                # Do not invalidate credentials refreshed after this request.
+                if config.webvpn_cookie == gateway_snapshot:
+                    config.webvpn_cookie = ""
+                    config.authserver_cookie = ""
+                raise WebVPNAuthenticationRequiredError(WEBVPN_AUTH_MESSAGE)
+            if 300 <= int(getattr(response, "status_code", 0) or 0) < 400:
+                raise requests.HTTPError(
+                    "WebVPN 返回重定向，已停止请求，请检查认证状态", response=response
+                )
         transient_failure = should_fail_over(response)
         if transient_failure:
             mark_failure(profile)

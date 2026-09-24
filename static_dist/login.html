@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>登录 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260908.1">
+  <link rel="stylesheet" href="/styles.css?build=20260924.1">
 </head>
 <body class="login-page">
   <section class="login-visual" aria-label="深大抢课助手">
@@ -55,11 +55,11 @@
             </label>
             <label class="backend-option">
               <input type="radio" name="backend" value="primary">
-              <span><strong>主站</strong><small>仅使用 bkxk.szu.edu.cn</small></span>
+              <span><strong>主站直连</strong><small>校内 / 校外通用</small></span>
             </label>
             <label class="backend-option">
               <input type="radio" name="backend" value="webvpn">
-              <span><strong>WebVPN</strong><small>统一认证后的只读备用入口</small></span>
+              <span><strong>WebVPN 备用</strong><small>仅验证码与只读查询；登录、选课仍走主站</small></span>
             </label>
           </div>
           <div id="backendStatus" class="backend-status" role="status" aria-live="polite">当前后端：自动（优先主站）</div>
@@ -111,6 +111,6 @@
   </main>
 
   <noscript>此页面需要启用 JavaScript。</noscript>
-  <script src="/login.js?build=20260908.1" defer></script>
+  <script src="/login.js?build=20260924.1" defer></script>
 </body>
 </html>

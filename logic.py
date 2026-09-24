@@ -132,7 +132,7 @@ def verify_vcode(
     structural_failures = 0
     for attempt in range(1, max_attempts + 1):
         try:
-            vtoken, cookie = get_new_image()
+            vtoken, cookie = get_new_image(preference=config.BACKEND_PRIMARY)
             # The school returned one complete captcha response. OCR failures
             # after this point are a separate category and break the streak.
             structural_failures = 0
@@ -142,7 +142,7 @@ def verify_vcode(
                 solved_attempt = attempt
                 break
             last_error = RuntimeError("OCR did not return four valid coordinates")
-        except CaptchaUnavailableError:
+        except (CaptchaUnavailableError, backend_service.WebVPNAuthenticationRequiredError):
             logger.info("School captcha is unavailable; OCR relogin stopped without retrying")
             raise
         except (ImportError, ModuleNotFoundError):
@@ -200,7 +200,9 @@ def verify_vcode_login_flow(
     structural_failures = 0
     for attempt in range(1, max_attempts + 1):
         try:
-            captcha = fetch_vtoken_and_image(1)
+            # Automatic recovery retains the primary-only login contract;
+            # the optional manual captcha route must not change this flow.
+            captcha = fetch_vtoken_and_image(1, preference=config.BACKEND_PRIMARY)
             # A valid token/image/cookie tuple ends any preceding school
             # response-contract streak, even when OCR cannot solve the image.
             structural_failures = 0
@@ -219,7 +221,7 @@ def verify_vcode_login_flow(
                     coordinates,
                 )
             last_error = RuntimeError("OCR did not return four valid coordinates")
-        except CaptchaUnavailableError:
+        except (CaptchaUnavailableError, backend_service.WebVPNAuthenticationRequiredError):
             raise
         except (ImportError, ModuleNotFoundError):
             raise
@@ -963,13 +965,20 @@ def _parse_captcha_token_response(response: requests.Response) -> str:
     return token.strip()
 
 
-def get_vtoken() -> str:
+def _captcha_backend_preference(preference: str | None = None) -> str:
+    """Resolve one explicit backend for a complete captcha round."""
+    selected = backend_service.normalize_preference(preference or backend_service.get_preference())
+    return config.BACKEND_WEBVPN if selected == config.BACKEND_WEBVPN else config.BACKEND_PRIMARY
+
+
+def get_vtoken(*, preference: str | None = None) -> str:
+    selected_preference = _captcha_backend_preference(preference)
     time_stamp = int(time.time() * 1000)
     response = _school_request(
         "POST",
         f"student/4/vcode.do?timestamp={time_stamp}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=selected_preference,
         omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
@@ -989,13 +998,14 @@ def _validate_captcha_image(image_data: bytes, content_type: str = "") -> None:
         )
 
 
-def get_new_image() -> tuple[str, str]:
-    vtoken = get_vtoken()
+def get_new_image(*, preference: str | None = None) -> tuple[str, str]:
+    preference = _captcha_backend_preference(preference)
+    vtoken = get_vtoken(preference=preference)
     response = _school_request(
         "GET",
         f"student/vcode/image.do?vtoken={vtoken}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=preference,
         omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
@@ -1013,13 +1023,14 @@ def get_new_image() -> tuple[str, str]:
     return vtoken, cookie
 
 
-def _fetch_vtoken_and_image_once() -> dict[str, str]:
+def _fetch_vtoken_and_image_once(*, preference: str | None = None) -> dict[str, str]:
+    preference = _captcha_backend_preference(preference)
     timestamp = int(time.time() * 1000)
     token_response = _school_request(
         "POST",
         f"student/4/vcode.do?timestamp={timestamp}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=preference,
         omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
         accept="application/json, text/javascript, */*; q=0.01",
@@ -1030,7 +1041,7 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
         "GET",
         f"student/vcode/image.do?vtoken={vtoken}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=preference,
         omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
         accept="application/json, text/javascript, */*; q=0.01",
@@ -1052,7 +1063,9 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
     }
 
 
-def fetch_vtoken_and_image(max_attempts: int = 3) -> dict[str, str]:
+def fetch_vtoken_and_image(
+    max_attempts: int = 3, *, preference: str | None = None
+) -> dict[str, str]:
     """Fetch the selected program's captcha with bounded attempts."""
     from study_program import is_graduate
 
@@ -1067,8 +1080,8 @@ def fetch_vtoken_and_image(max_attempts: int = 3) -> dict[str, str]:
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            return _fetch_vtoken_and_image_once()
-        except CaptchaUnavailableError:
+            return _fetch_vtoken_and_image_once(preference=preference)
+        except (CaptchaUnavailableError, backend_service.WebVPNAuthenticationRequiredError):
             raise
         except (requests.RequestException, CaptchaResponseError, ValueError, RuntimeError) as exc:
             last_error = exc

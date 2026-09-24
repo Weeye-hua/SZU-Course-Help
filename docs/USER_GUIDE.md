@@ -1,4 +1,4 @@
-# 深大抢课助手 3.7.0 使用手册
+# 深大抢课助手 3.7.1 使用手册
 
 - 适用项目：SZU Course Help
 - 下载页面：https://github.com/Weeye-hua/SZU-Course-Help/releases/latest
@@ -10,10 +10,10 @@
 
 在最新 Release 的 Assets 中按系统下载：
 
-- Windows 10/11 64 位：`SZU-Course-Help-v3.7.0-windows-x64.zip`
-- macOS Apple 芯片：`SZU-Course-Help-v3.7.0-macos-arm64.zip`
-- macOS Intel 芯片：`SZU-Course-Help-v3.7.0-macos-x64.zip`
-- Linux 64 位：`SZU-Course-Help-v3.7.0-linux-x64.zip`
+- Windows 10/11 64 位：`SZU-Course-Help-v3.7.1-windows-x64.zip`
+- macOS Apple 芯片：`SZU-Course-Help-v3.7.1-macos-arm64.zip`
+- macOS Intel 芯片：`SZU-Course-Help-v3.7.1-macos-x64.zip`
+- Linux 64 位：`SZU-Course-Help-v3.7.1-linux-x64.zip`
 
 必须先完整解压 ZIP。不要在压缩包预览窗口中运行，也不要只拖出主程序，否则 OCR 模型和依赖文件可能缺失。普通用户不要下载 GitHub 自动生成的 Source code 压缩包。
 
@@ -181,7 +181,7 @@ Card Key 只在本机验证，不发送给学校。学校密码只保存在当�
 
 本科生自动重登录的验证码 token、图片和登录提交使用同一轮干净 Cookie：登录请求只携带本轮验证码下发的 `route` 与 `insert_cookie`，不会拼接已经过期的学校会话 Cookie。WebVPN 只读请求在省略学校会话 Cookie 时仍会保留独立的网关认证 Cookie。研究生使用独立 HTTPS 入口和当前验证码轮次的 Cookie，不混用本科生会话。
 
-启动时会真实初始化 OCR。若提示依赖不可用，手动首次登录仍可使用，但会话过期后需要手动登录。v3.7.0 继续兼容 `ddddocr 1.6.1` 的 `ddddocr.core`、顶层新引擎和旧 `DdddOcr` API；官方 Release 构建和 Python 3.13/3.14 CI 均执行初始化测试。
+启动时会真实初始化 OCR。若提示依赖不可用，手动首次登录仍可使用，但会话过期后需要手动登录。v3.7.1 继续兼容 `ddddocr 1.6.1` 的 `ddddocr.core`、顶层新引擎和旧 `DdddOcr` API；官方 Release 构建和 Python 3.13/3.14 CI 均执行初始化测试。
 
 ## 九、Release 数据目录和升级迁移
 
@@ -209,12 +209,16 @@ Card Key 私钥位于当前模式数据目录的 `keys` 子目录。本科生首
 
 本节仅适用于本科生模式；研究生使用独立学校入口，不提供此选项。
 
+根据学校提供的本科生选课说明，校内和校外均可直接访问 `http://bkxk.szu.edu.cn`，一般使用默认“自动”或“主站直连”即可。不要将校外位置、暂未开放或一次请求失败当作必须使用 WebVPN 的依据；特殊网络安排以学校当前通知为准。
+
 主站只读查询短暂不可用时，可以完成 WebVPN 统一认证。程序会启动本机 Chromium/Chrome/Edge 的一次性受控窗口，获取所需网关 Cookie 后关闭并删除临时浏览器配置。
 
-- WebVPN 只参与登录与只读课程/已选信息查询。
+- v3.7.1 修复可选 WebVPN 验证码获取，token 和图片保持同一入口。WebVPN 用于验证码与只读课程/已选信息查询，不提供完整的 WebVPN 登录选课链路；手动选择此入口也不会改变 OCR 自动重登录的主站直连策略。
+- 学校登录仍直连主站。备用验证码可用不代表主站登录和选课也可用；主站不可达时不会自动把登录或选课提交切到 WebVPN。
 - 选课提交固定使用学校主站且不跨后端重试；本版不提供自动退课。
 - 程序不保存浏览器密码，也不注入持久化浏览器资料。
 - 没有完整 WebVPN Cookie 时不会假装回退成功；主站仍是唯一可用入口。
+- 网关跳回统一认证页时会停止本次验证码重试并提示重新认证；学校未开放、普通超时、验证码响应异常分别显示，不会一律误报为需要扫码。
 
 ## 十一、常见问题
 
@@ -278,8 +282,8 @@ python -m pytest -q
 
 `tests/conftest.py` 拦截所有未模拟的外部 `requests` 调用，测试不会访问深圳大学系统，也不会执行选课或退课。
 
-研究生真实联调仅覆盖登录和课程/课表只读查询，选课提交、结果核验及异常恢复使用模拟响应验证，未用测试账号执行真实选课或退课。请先核对学校官方页面，最终资格和结果以学校为准。v3.7.0 不包含邮件通知功能。
+研究生真实联调仅覆盖登录和课程/课表只读查询，选课提交、结果核验及异常恢复使用模拟响应验证，未用测试账号执行真实选课或退课。请先核对学校官方页面，最终资格和结果以学校为准。v3.7.1 不包含邮件通知功能。
 
 ---
 
-版本：3.7.0 · 许可证：MIT License · https://github.com/Weeye-hua/SZU-Course-Help
+版本：3.7.1 · 许可证：MIT License · https://github.com/Weeye-hua/SZU-Course-Help

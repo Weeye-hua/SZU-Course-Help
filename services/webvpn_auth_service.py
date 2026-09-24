@@ -249,7 +249,10 @@ def extract_webvpn_cookie_header(cookies: list[dict[str, Any]]) -> str:
         name = str(cookie.get("name", ""))
         domain = str(cookie.get("domain", "")).lstrip(".").lower()
         value = str(cookie.get("value", ""))
-        if name in allowed and domain.endswith("szu.edu.cn") and value:
+        expires = cookie.get("expires", -1)
+        if isinstance(expires, (int, float)) and 0 < expires <= time.time():
+            continue
+        if name in allowed and (domain == "szu.edu.cn" or domain.endswith(".szu.edu.cn")) and value:
             values[name] = value
     if not all(name in values for name in backend_service.WEBVPN_COOKIE_NAMES):
         return ""
@@ -446,6 +449,9 @@ class ControlledBrowserManager:
         authenticated = backend_service.has_webvpn_cookies()
         if authenticated and state not in {"error"}:
             state = "authenticated"
+        elif not authenticated and state == "authenticated":
+            state = "expired"
+            message = backend_service.WEBVPN_AUTH_MESSAGE
         return {
             "state": state,
             "authenticated": authenticated,

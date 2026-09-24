@@ -55,7 +55,7 @@ def test_coordinate_serialization_rejects_invalid_values():
 def test_ocr_retry_is_bounded(monkeypatch):
     monkeypatch.setattr(config, "student_id", "2024110122")
     monkeypatch.setattr(config, "password", "secret")
-    monkeypatch.setattr(logic, "get_new_image", lambda: ("token", "route=a; insert_cookie=b"))
+    monkeypatch.setattr(logic, "get_new_image", lambda **_: ("token", "route=a; insert_cookie=b"))
     monkeypatch.setattr(logic, "recognize_captcha_centers", lambda: [])
     monkeypatch.setattr(logic.time, "sleep", lambda *_: None)
 
@@ -112,7 +112,7 @@ def test_ocr_retries_transient_exception_before_success(monkeypatch):
     monkeypatch.setattr(config, "password", "secret")
     calls = []
 
-    def fake_image():
+    def fake_image(**_kwargs):
         calls.append(1)
         if len(calls) == 1:
             raise RuntimeError("temporary malformed image")
@@ -156,7 +156,7 @@ def test_batch_refresh_discards_result_from_replaced_session(monkeypatch):
 def test_captcha_fetch_retries_transient_failure(monkeypatch):
     calls = []
 
-    def fake_fetch():
+    def fake_fetch(**_kwargs):
         calls.append(1)
         if len(calls) == 1:
             raise RuntimeError("empty image")
@@ -236,7 +236,7 @@ def test_captcha_fetch_completely_omits_cookie_header(
 def test_captcha_unavailable_is_not_retried(monkeypatch):
     calls = []
 
-    def unavailable():
+    def unavailable(**_kwargs):
         calls.append(1)
         raise logic.CaptchaUnavailableError("closed")
 
@@ -251,7 +251,7 @@ def test_captcha_unavailable_is_not_retried(monkeypatch):
 def test_captcha_fetch_preserves_exhausted_transient_failure(monkeypatch):
     calls = []
 
-    def malformed():
+    def malformed(**_kwargs):
         calls.append(1)
         raise logic.CaptchaResponseError("bad image")
 
@@ -566,7 +566,7 @@ def test_structural_captcha_failure_terminates_terminal_ocr_loop_early(monkeypat
     monkeypatch.setattr(config, "password", "secret")
     calls = []
 
-    def contract_failure():
+    def contract_failure(**_kwargs):
         calls.append(1)
         raise logic.CaptchaResponseError("验证码图片响应缺少必要 Cookie")
 
@@ -584,7 +584,7 @@ def test_non_structural_failure_resets_the_structural_captcha_counter(monkeypatc
     monkeypatch.setattr(config, "password", "secret")
     calls = []
 
-    def flaky():
+    def flaky(**_kwargs):
         calls.append(1)
         if len(calls) == 2:
             raise RuntimeError("temporary network glitch")
@@ -604,7 +604,7 @@ def test_unsolved_captcha_resets_the_structural_failure_streak(monkeypatch):
     monkeypatch.setattr(config, "password", "secret")
     calls = []
 
-    def captcha_sequence():
+    def captcha_sequence(**_kwargs):
         calls.append(1)
         if len(calls) == 2:
             return "vtoken", "route=fresh; insert_cookie=node"

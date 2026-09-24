@@ -93,7 +93,9 @@ def test_login_captcha_ui_has_terminal_failure_states():
     assert 'id="captchaActions"' in login
     assert "当前时段暂无验证码" in script
     assert 'code === "CAPTCHA_UNAVAILABLE"' in script
-    assert 'loginState.backend === "webvpn"' in script
+    assert 'const webvpnFallback = status === "webvpn-auth-required";' in script
+    assert 'status !== "ready" && status !== "loading"' not in script
+    assert "loginState.selectingBackend" in script
     assert "loginState.captcha = null" in script
     assert "当前选择 WebVPN，但验证码暂时无法获取，请先完成统一认证" in script
     assert "loginElements.captchaActions.hidden = webvpnFallback" in script

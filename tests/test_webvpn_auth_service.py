@@ -4,7 +4,29 @@ import os
 
 import pytest
 
+import config
 from services import webvpn_auth_service
+
+
+def test_expired_gateway_status_does_not_remain_authenticated(monkeypatch):
+    monkeypatch.setattr(config, "webvpn_cookie", "")
+    manager = webvpn_auth_service.ControlledBrowserManager()
+    manager._state = "authenticated"
+    status = manager.status()
+    assert status["state"] == "expired"
+    assert status["authenticated"] is False
+
+
+def test_expired_or_lookalike_domain_cookies_are_not_imported():
+    valid = [
+        {"name": name, "value": "valid", "domain": ".webvpn.szu.edu.cn"}
+        for name in webvpn_auth_service.backend_service.WEBVPN_COOKIE_NAMES
+    ]
+    invalid = [
+        {"name": "_webvpn_key", "value": "wrong", "domain": "evilszu.edu.cn"},
+        {"name": "_webvpn_key", "value": "expired", "domain": "webvpn.szu.edu.cn", "expires": 1},
+    ]
+    assert "_webvpn_key=valid" in webvpn_auth_service.extract_webvpn_cookie_header(valid + invalid)
 
 
 def test_build_auth_url_uses_real_authserver_and_webvpn_callback():

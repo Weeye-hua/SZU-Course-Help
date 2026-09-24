@@ -8,7 +8,14 @@ import pytest
 import requests
 
 import database
+import logic
 from services import auth_service, course_cache_service
+
+
+@pytest.fixture(autouse=True)
+def isolate_captcha_files(monkeypatch, tmp_path):
+    """Never overwrite a running user's captcha while exercising OCR helpers."""
+    monkeypatch.setattr(logic, "_captcha_image_path", lambda: tmp_path / "captcha.jpg")
 
 
 @pytest.fixture(autouse=True)
