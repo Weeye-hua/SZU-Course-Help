@@ -97,6 +97,12 @@ const appState = {
   knownSuccessIds: new Set(),
   wasTaskRunning: false,
   taskControlPending: false,
+  scheduleClock: null,
+  schedulePending: false,
+  scheduleError: "",
+  schoolStartTime: null,
+  schoolStartError: "",
+  schoolStartLoading: false,
   recoveryHideTimer: null,
   recoveryDismissedAt: "",
   lastReloginStatus: "idle",
@@ -135,6 +141,20 @@ const appElements = {
   cartList: document.querySelector("#cartList"),
   cartHint: document.querySelector("#cartHint"),
   openEnrollConfirm: document.querySelector("#openEnrollConfirm"),
+  schedulePanel: document.querySelector("#schedulePanel"),
+  scheduleStatus: document.querySelector("#scheduleStatus"),
+  scheduleClock: document.querySelector("#scheduleClock"),
+  scheduleTime: document.querySelector("#scheduleTime"),
+  scheduleModeSchool: document.querySelector("#scheduleModeSchool"),
+  scheduleModeCustom: document.querySelector("#scheduleModeCustom"),
+  schoolScheduleDetail: document.querySelector("#schoolScheduleDetail"),
+  schoolStartTime: document.querySelector("#schoolStartTime"),
+  refreshSchoolStartTime: document.querySelector("#refreshSchoolStartTime"),
+  customScheduleField: document.querySelector("#customScheduleField"),
+  scheduleConfirm: document.querySelector("#scheduleConfirm"),
+  scheduleMessage: document.querySelector("#scheduleMessage"),
+  scheduleStart: document.querySelector("#scheduleStart"),
+  scheduleCancel: document.querySelector("#scheduleCancel"),
   enrollDialog: document.querySelector("#enrollDialog"),
   phaseConfirmation: document.querySelector("#phaseConfirmation"),
   startEnroll: document.querySelector("#startEnroll"),
@@ -1059,6 +1079,21 @@ function applyProgramPresentation(session) {
 
 function applySessionData(session) {
   applyProgramPresentation(session);
+  if (!appState.session && session.scheduled_enrollment?.status === "armed") {
+    appElements.scheduleModeSchool.checked = session.scheduled_enrollment.mode === "school";
+    appElements.scheduleModeCustom.checked = session.scheduled_enrollment.mode === "custom";
+  }
+  if (appState.session?.batch_code && appState.session.batch_code !== session.batch_code) {
+    appState.schoolStartTime = null;
+    appState.schoolStartError = "批次已变化，请重新读取学校开抢时间";
+  }
+  appElements.schedulePanel.hidden = appState.program === "graduate";
+  if (session.scheduled_enrollment?.current_time) {
+    appState.scheduleClock = {
+      epoch: Date.parse(session.scheduled_enrollment.current_time),
+      observed: performance.now(),
+    };
+  }
   const previousReloginStatus = appState.lastReloginStatus;
   const previousCatalogScope = catalogScopeKey(appState.session);
   const nextCatalogScope = catalogScopeKey(session);
@@ -1100,6 +1135,7 @@ function applySessionData(session) {
   if (session.logged_in && !session.relogin_in_progress) hideSessionDialog();
   updateTaskIndicator();
   setPhasePresentation();
+  renderSchedule();
   if (appState.program === "graduate") {
     appElements.phaseTitle.textContent = session.batch_name || "研究生选课";
     appElements.phaseDescription.textContent = [session.phase_message, session.opens_at && session.closes_at ? `${session.opens_at} 至 ${session.closes_at}` : ""].filter(Boolean).join(" · ");
@@ -1999,6 +2035,125 @@ async function refreshCoursesFromNetwork() {
   await loadCourses({ preserveExisting: true, forceLive: true });
 }
 
+function renderSchedule() {
+  if (appState.program === "graduate") return;
+  const schedule = appState.session?.scheduled_enrollment || { status: "idle", message: "" };
+  const currentMs = appState.scheduleClock
+    ? appState.scheduleClock.epoch + performance.now() - appState.scheduleClock.observed
+    : Date.now();
+  const nowText = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", hour12: false, month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).format(new Date(currentMs));
+  appElements.scheduleClock.textContent = `北京时间 ${nowText} · ${schedule.clock_source === "school" ? "已参考学校响应校时" : "使用本机时间"}`;
+  const schoolMode = appElements.scheduleModeSchool.checked;
+  appElements.schoolScheduleDetail.hidden = !schoolMode;
+  appElements.customScheduleField.hidden = schoolMode;
+  appElements.refreshSchoolStartTime.disabled = appState.schoolStartLoading;
+  if (appState.schoolStartLoading) {
+    appElements.schoolStartTime.textContent = "正在读取学校开抢时间…";
+  } else if (appState.schoolStartTime) {
+    const schoolTime = appState.schoolStartTime;
+    appElements.schoolStartTime.textContent = `${schoolTime.batch_name || "当前批次"}开抢：${schoolTime.target_at.slice(0, 19).replace("T", " ")}（北京时间）`;
+  } else {
+    appElements.schoolStartTime.textContent = appState.schoolStartError || "暂未读取学校开抢时间";
+  }
+  const labels = { idle: "未预约", armed: "等待启动", starting: "正在核验", started: "已启动", failed: "启动失败" };
+  appElements.scheduleStatus.textContent = labels[schedule.status] || "未预约";
+  appElements.scheduleStatus.className = `status-pill ${schedule.status === "armed" ? "status-warning" : schedule.status === "started" ? "status-success" : schedule.status === "failed" ? "status-danger" : "status-neutral"}`;
+  if (schedule.status === "armed" && schedule.target_at) {
+    const remaining = Math.max(0, Math.ceil((Date.parse(schedule.target_at) - currentMs) / 1000));
+    const hours = Math.floor(remaining / 3600);
+    const minutes = Math.floor((remaining % 3600) / 60);
+    const seconds = remaining % 60;
+    appElements.scheduleMessage.textContent = `已预约${schedule.mode === "school" ? "学校开抢时间" : "自定义时间"} ${schedule.target_at.slice(0, 19).replace("T", " ")}（北京时间），还剩 ${hours} 小时 ${minutes} 分 ${seconds} 秒。到点后将重新核验学校状态。`;
+  } else {
+    appElements.scheduleMessage.textContent = schedule.message || "到点后会重新检查学校批次与清单。请保持本程序运行。";
+  }
+  if (appState.scheduleError) {
+    appElements.scheduleMessage.textContent = appState.scheduleError;
+  }
+  const hasPending = appState.cart.some((item) => (
+    (item.status || "PENDING") === "PENDING" && preferenceFor(item).autoEnabled !== false
+  ));
+  const busy = Boolean(appState.session?.task_running || appState.schedulePending || schedule.status === "starting");
+  appElements.scheduleStart.textContent = schedule.status === "armed" ? "修改预约" : "预约启动";
+  appElements.scheduleStart.disabled = busy || !hasPending || !appElements.scheduleConfirm.checked
+    || (schoolMode ? !appState.schoolStartTime : !appElements.scheduleTime.value);
+  appElements.scheduleCancel.hidden = schedule.status !== "armed";
+  appElements.scheduleCancel.disabled = appState.schedulePending;
+}
+
+async function loadSchoolStartTime() {
+  if (appState.program === "graduate" || appState.schoolStartLoading) return;
+  appState.schoolStartLoading = true;
+  renderSchedule();
+  try {
+    appState.schoolStartTime = await api("/api/enroll/school-start-time");
+    appState.schoolStartError = "";
+  } catch (error) {
+    appState.schoolStartTime = null;
+    appState.schoolStartError = error.message || "无法读取学校开抢时间";
+  } finally {
+    appState.schoolStartLoading = false;
+    renderSchedule();
+  }
+}
+
+async function armSchedule() {
+  const schoolMode = appElements.scheduleModeSchool.checked;
+  if (appState.schedulePending || !appElements.scheduleConfirm.checked) return;
+  if (schoolMode ? !appState.schoolStartTime : !appElements.scheduleTime.value) return;
+  appState.schedulePending = true;
+  appState.scheduleError = "";
+  renderSchedule();
+  try {
+    const result = await api("/api/enroll/schedule", {
+      method: "POST",
+      body: JSON.stringify({
+        mode: schoolMode ? "school" : "custom",
+        ...(schoolMode
+          ? { expected_target_at: appState.schoolStartTime.target_at }
+          : { target_at: `${appElements.scheduleTime.value}+08:00` }),
+        confirmed_phase: true,
+      }),
+    });
+    appState.session.scheduled_enrollment = result;
+    appState.scheduleClock = { epoch: Date.parse(result.current_time), observed: performance.now() };
+    appElements.scheduleConfirm.checked = false;
+    showToast("预约已保存，请保持本程序运行");
+  } catch (error) {
+    if (error.code === "SCHOOL_START_TIME_CHANGED" && error.payload?.target_at) {
+      appState.schoolStartTime = {
+        target_at: error.payload.target_at,
+        batch_name: error.payload.batch_name || "当前批次",
+      };
+      appElements.scheduleConfirm.checked = false;
+    }
+    appState.scheduleError = error.message;
+    showToast(error.message, true);
+  } finally {
+    appState.schedulePending = false;
+    renderSchedule();
+  }
+}
+
+async function cancelSchedule() {
+  if (appState.schedulePending) return;
+  appState.schedulePending = true;
+  try {
+    const result = await api("/api/enroll/schedule/cancel", { method: "POST" });
+    appState.session.scheduled_enrollment = result;
+    appState.scheduleError = "";
+    showToast("预约已取消");
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    appState.schedulePending = false;
+    renderSchedule();
+  }
+}
+
 function syncEnrollControls() {
   const running = Boolean(appState.session?.task_running);
   const paused = Boolean(appState.session?.task_paused);
@@ -2008,6 +2163,7 @@ function syncEnrollControls() {
     (item.status || "PENDING") === "PENDING" && preferenceFor(item).autoEnabled !== false
   ));
   appElements.openEnrollConfirm.disabled = !appState.grabPhase || running || !hasPending;
+  renderSchedule();
   if (appElements.stopEnroll) appElements.stopEnroll.disabled = !running || stopping;
   if (running && stopping) {
     appElements.cartHint.textContent = appState.session?.task_stopping_reason
@@ -3161,6 +3317,9 @@ appElements.openCart.addEventListener("click", async () => {
   await loadCart();
   if (appState.session?.task_running) await loadEnrollProgress();
   appElements.cartDialog.showModal();
+  if (appState.program !== "graduate" && appState.session?.logged_in) {
+    void loadSchoolStartTime();
+  }
 });
 appElements.openMyCourses.addEventListener("click", async () => {
   appState.scheduleConflict = null;
@@ -3188,6 +3347,18 @@ appElements.phaseConfirmation.addEventListener("change", () => {
   appElements.startEnroll.disabled = !appElements.phaseConfirmation.checked;
 });
 appElements.startEnroll.addEventListener("click", startEnrollment);
+appElements.scheduleStart.addEventListener("click", armSchedule);
+appElements.scheduleCancel.addEventListener("click", cancelSchedule);
+function clearScheduleError() {
+  appState.scheduleError = "";
+  renderSchedule();
+}
+appElements.scheduleTime.addEventListener("input", clearScheduleError);
+appElements.scheduleConfirm.addEventListener("change", clearScheduleError);
+appElements.scheduleModeSchool.addEventListener("change", clearScheduleError);
+appElements.scheduleModeCustom.addEventListener("change", clearScheduleError);
+appElements.refreshSchoolStartTime.addEventListener("click", loadSchoolStartTime);
+window.setInterval(renderSchedule, 1000);
 appElements.taskControlButton.addEventListener("click", toggleEnrollmentPause);
 appElements.stopEnroll?.addEventListener("click", stopEnrollment);
 appElements.studentLabel?.addEventListener("click", requestAutomaticRelogin);

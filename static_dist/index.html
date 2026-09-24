@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260924.1">
+  <link rel="stylesheet" href="/styles.css?build=20260924.2">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -200,6 +200,43 @@
         </div>
         <p class="settings-note">“无限次”表示该模式不会因业务失败自动降级；网络异常和 5xx 不计入失败次数。优先级只控制尝试顺序，助手不会自动退选任何已选课程。</p>
       </section>
+      <section id="schedulePanel" class="schedule-panel" aria-label="定时启动抢课">
+        <div class="schedule-heading">
+          <div>
+            <p class="eyebrow">定时启动</p>
+            <strong>预约自动抢课</strong>
+          </div>
+          <span id="scheduleStatus" class="status-pill status-neutral">未预约</span>
+        </div>
+        <p id="scheduleClock" class="schedule-note">正在读取北京时间…</p>
+        <div class="schedule-choices" role="radiogroup" aria-label="定时启动方式">
+          <label class="schedule-choice" for="scheduleModeSchool">
+            <input id="scheduleModeSchool" type="radio" name="scheduleMode" value="school" checked>
+            <span><strong>学校开抢时间</strong><small>按学校公布的当前批次时间启动</small></span>
+          </label>
+          <label class="schedule-choice" for="scheduleModeCustom">
+            <input id="scheduleModeCustom" type="radio" name="scheduleMode" value="custom">
+            <span><strong>自定义时间</strong><small>自行设定北京时间</small></span>
+          </label>
+        </div>
+        <div id="schoolScheduleDetail" class="school-schedule-detail">
+          <p id="schoolStartTime" class="schedule-school-time">正在读取学校开抢时间…</p>
+          <button id="refreshSchoolStartTime" class="button button-quiet" type="button">重新读取</button>
+        </div>
+        <label id="customScheduleField" class="setting-field" for="scheduleTime" hidden>
+          <span>启动时间（北京时间）</span>
+          <input id="scheduleTime" type="datetime-local" step="1">
+        </label>
+        <label class="check-row schedule-confirm" for="scheduleConfirm">
+          <input id="scheduleConfirm" type="checkbox">
+          <span>我已确认仅在学校允许的复选、正选或补选阶段启动</span>
+        </label>
+        <p id="scheduleMessage" class="schedule-note" role="status" aria-live="polite">到点后会重新检查学校批次与清单。请保持本程序运行。</p>
+        <div class="schedule-actions">
+          <button id="scheduleStart" class="button button-primary" type="button">预约启动</button>
+          <button id="scheduleCancel" class="button button-quiet" type="button" hidden>取消预约</button>
+        </div>
+      </section>
       <div id="cartList" class="cart-list"></div>
       <section id="enrollProgress" class="enroll-progress" hidden>
         <div class="progress-head">
@@ -311,6 +348,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script src="/schedule-parser.js?build=20260901.1" defer></script>
-  <script src="/course-app.js?build=20260924.1" defer></script>
+  <script src="/course-app.js?build=20260924.2" defer></script>
 </body>
 </html>

@@ -16,6 +16,7 @@ import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 import requests
@@ -37,7 +38,13 @@ from card_key import verify_card_key
 from course_list import CatalogRequestContext
 from logging_config import configure_logging
 from project_paths import external_process_env, resource_path
-from services import backend_service, cart_service, graduate_service, webvpn_auth_service
+from services import (
+    backend_service,
+    cart_service,
+    graduate_service,
+    scheduled_enroll,
+    webvpn_auth_service,
+)
 from services.auth_service import (
     LOGIN_ERROR_MSG,
     attempt_automatic_relogin,
@@ -100,7 +107,7 @@ from study_program import is_graduate, program_payload
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
 RUNTIME_PORT_ENV = "COURSE_SELECT_RUNTIME_PORT"
-UI_ASSET_BUILD = "20260924.1"
+UI_ASSET_BUILD = "20260924.2"
 logger = logging.getLogger(__name__)
 OFFICIAL_SCHOOL_HOME_URL = program_payload()["school_url"]
 
@@ -295,6 +302,15 @@ class EnrollmentStartRequest(BaseModel):
     confirmed_phase: bool = False
 
 
+class ScheduledEnrollmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["school", "custom"] = "custom"
+    target_at: str | None = Field(default=None, min_length=20, max_length=40)
+    expected_target_at: str | None = Field(default=None, min_length=20, max_length=40)
+    confirmed_phase: StrictBool
+
+
 class EnrollmentModeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -348,6 +364,7 @@ async def startup_runtime_services() -> None:
 
 async def shutdown_runtime_services() -> None:
     global _runtime_started
+    scheduled_enroll.cancel()
     session_manager.stop_keepalive()
     with _runtime_start_lock:
         _runtime_started = session_manager.keepalive_running
@@ -480,6 +497,7 @@ def _session_payload() -> dict:
         "task_stopping": task_state["stopping"],
         "task_stopping_reason": task_state["stopping_reason"],
         "task_queue_revision": task_state["queue_revision"],
+        "scheduled_enrollment": None if is_graduate() else scheduled_enroll.status(),
         "campus_options": [] if is_graduate() else campus_options_payload(),
         **backend_service.backend_payload(),
     }
@@ -973,6 +991,7 @@ async def api_logout():
             status_code=409,
             content={"message": "抢课任务运行中，暂不能清除登录态", "is_error": True},
         )
+    scheduled_enroll.cancel()
     clear_login_state()
     return JSONResponse(
         content=ApiMessage(message="已清除本地登录态", is_error=False).model_dump(),
@@ -1718,9 +1737,8 @@ async def api_cart_priorities(payload: dict):
     return JSONResponse(content=result, headers=get_no_cache_headers())
 
 
-@app.post("/api/enroll/courses")
-async def api_start_enroll(
-    request: EnrollmentStartRequest,
+async def _start_enrollment(
+    request: EnrollmentStartRequest, expected_batch_code: str | None = None
 ):
     """Start one guarded background worker without changing school request fields."""
     snapshot = get_session_snapshot()
@@ -1754,6 +1772,13 @@ async def api_start_enroll(
 
     snapshot = get_session_snapshot()
     batch_name = str(snapshot["batch_name"]).strip()
+    if expected_batch_code and str(snapshot["batch_code"]) != expected_batch_code:
+        return _api_error(
+            409,
+            "学校选课批次已变化，预约未启动",
+            "SCHEDULE_BATCH_CHANGED",
+            retryable=False,
+        )
     if not snapshot["batch_code"]:
         return JSONResponse(
             status_code=503,
@@ -1808,6 +1833,145 @@ async def api_start_enroll(
         )
 
     return ApiMessage(message="抢课任务已在后台启动", is_error=False)
+
+
+@app.post("/api/enroll/courses")
+async def api_start_enroll(request: EnrollmentStartRequest):
+    result = await _start_enrollment(request)
+    if isinstance(result, ApiMessage) and not result.is_error:
+        scheduled_enroll.cancel()
+    return result
+
+
+@app.get("/api/enroll/schedule")
+async def api_get_enroll_schedule():
+    return JSONResponse(content=scheduled_enroll.status(), headers=get_no_cache_headers())
+
+
+async def _get_school_start_time() -> dict[str, str]:
+    snapshot = get_session_snapshot()
+    student_id = str(snapshot["student_id"])
+    token = str(config.token)
+    await asyncio.to_thread(refresh_elective_batch, student_id, token)
+    refreshed = get_session_snapshot()
+    if refreshed["student_id"] != student_id or not refreshed["batch_code"]:
+        raise logic.SchoolStartTimeUnavailableError("当前选课批次已变化，请重新读取学校时间")
+    start_time = await asyncio.to_thread(
+        logic.fetch_undergraduate_start_time,
+        str(refreshed["batch_code"]),
+        str(config.token),
+        str(config.combined_cookie),
+    )
+    if get_session_snapshot()["student_id"] != student_id:
+        raise logic.SchoolStartTimeUnavailableError("登录账号已变化，请重新读取学校时间")
+    return {
+        "target_at": start_time.astimezone(scheduled_enroll.BEIJING).isoformat(timespec="seconds"),
+        "batch_name": str(refreshed["batch_name"]),
+        "batch_code": str(refreshed["batch_code"]),
+    }
+
+
+@app.get("/api/enroll/school-start-time")
+async def api_school_start_time():
+    if is_graduate():
+        return _api_error(400, "仅支持本科生选课", "SCHEDULE_UNSUPPORTED", retryable=False)
+    snapshot = get_session_snapshot()
+    if not snapshot["logged_in"] or not snapshot["student_id"]:
+        return _not_logged_in_response()
+    try:
+        payload = await _get_school_start_time()
+    except logic.SchoolBatchSessionExpiredError:
+        return _not_logged_in_response()
+    except Exception as exc:
+        logger.info("School start time unavailable: %s", exc)
+        return _api_error(503, str(exc), "SCHOOL_START_TIME_UNAVAILABLE", retryable=True)
+    return JSONResponse(content=payload, headers=get_no_cache_headers())
+
+
+@app.post("/api/enroll/schedule")
+async def api_schedule_enroll(request: ScheduledEnrollmentRequest):
+    if is_graduate():
+        return _api_error(400, "定时启动仅支持本科生选课", "SCHEDULE_UNSUPPORTED", retryable=False)
+    snapshot = get_session_snapshot()
+    if not snapshot["logged_in"] or not snapshot["student_id"]:
+        return _not_logged_in_response()
+    if is_enroll_task_running():
+        return _api_error(409, "已有抢课任务正在运行", "ENROLL_TASK_RUNNING", retryable=False)
+    if not request.confirmed_phase:
+        return _api_error(400, "请先确认仅在学校允许的阶段启动", "PHASE_NOT_CONFIRMED", retryable=False)
+    if not any(row.get("auto_enabled", 1) for row in cart_service.get_courses_by_status("PENDING")):
+        return _api_error(400, "清单中没有启用自动抢课的待抢课程", "NO_ENABLED_PENDING_COURSE", retryable=False)
+    try:
+        if request.mode == "school":
+            school_time = await _get_school_start_time()
+            if school_time["target_at"] != request.expected_target_at:
+                return _api_error(
+                    409,
+                    "学校开抢时间已变化，请核对新时间后再次预约",
+                    "SCHOOL_START_TIME_CHANGED",
+                    retryable=True,
+                    target_at=school_time["target_at"],
+                    batch_name=school_time["batch_name"],
+                    batch_code=school_time["batch_code"],
+                )
+            target = scheduled_enroll.parse_target(school_time["target_at"])
+        else:
+            target = scheduled_enroll.parse_target(request.target_at or "")
+    except logic.SchoolBatchSessionExpiredError:
+        return _not_logged_in_response()
+    except logic.SchoolStartTimeUnavailableError as exc:
+        return _api_error(503, str(exc), "SCHOOL_START_TIME_UNAVAILABLE", retryable=True)
+    except ValueError as exc:
+        return _api_error(400, str(exc), "INVALID_SCHEDULE_TIME", retryable=False)
+    except Exception as exc:
+        logger.info("Could not read school start time: %s", exc)
+        return _api_error(503, "无法从学校读取开始时间", "SCHOOL_START_TIME_UNAVAILABLE", retryable=True)
+    student_id = str(snapshot["student_id"])
+    scheduled_batch_code = school_time["batch_code"] if request.mode == "school" else None
+
+    def start_at_target() -> tuple[bool, str]:
+        current = get_session_snapshot()
+        if current["student_id"] != student_id:
+            return False, "登录账号已变化，预约未启动"
+        result = asyncio.run(
+            _start_enrollment(
+                EnrollmentStartRequest(confirmed_phase=True),
+                expected_batch_code=scheduled_batch_code,
+            )
+        )
+        if isinstance(result, JSONResponse):
+            body = json.loads(result.body)
+            return False, str(body.get("message", "预约启动失败"))
+        return not result.is_error, result.message
+
+    def sync_clock() -> datetime | None:
+        current = get_session_snapshot()
+        if current["student_id"] == student_id and current["logged_in"]:
+            refresh_elective_batch(student_id, config.token)
+            if request.mode == "school":
+                refreshed = get_session_snapshot()
+                if str(refreshed["batch_code"]) != scheduled_batch_code:
+                    raise logic.SchoolStartTimeUnavailableError("学校选课批次已变化")
+                return logic.fetch_undergraduate_start_time(
+                    scheduled_batch_code, config.token, config.combined_cookie
+                )
+        return None
+
+    try:
+        return JSONResponse(
+            content=scheduled_enroll.arm(
+                target, student_id, start_at_target, sync_clock, mode=request.mode
+            )
+        )
+    except RuntimeError as exc:
+        return _api_error(409, str(exc), "SCHEDULE_STARTING", retryable=True)
+
+
+@app.post("/api/enroll/schedule/cancel")
+async def api_cancel_enroll_schedule():
+    if not scheduled_enroll.cancel():
+        return _api_error(409, "当前没有可取消的预约", "SCHEDULE_NOT_ARMED", retryable=False)
+    return JSONResponse(content=scheduled_enroll.status())
 
 
 @app.get("/api/enroll/status")
