@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 import os
 import re
 import time
 import unicodedata
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ import config
 from project_paths import data_dir
 from school_password import encrypt_school_password
 from school_session import is_session_expired_response
-from services import backend_service
+from services import backend_service, school_clock
 
 REQUEST_TIMEOUT = (5, 15)
 CAPTCHA_REQUEST_TIMEOUT = (3, 8)
@@ -78,6 +80,10 @@ class SchoolBatchSessionExpiredError(RuntimeError):
 
 class ElectiveBatchUnavailableError(RuntimeError):
     """The school did not expose an active elective batch."""
+
+
+class SchoolStartTimeUnavailableError(RuntimeError):
+    """The school response did not identify a usable start for this batch."""
 
 
 class CaptchaUnavailableError(RuntimeError):
@@ -291,6 +297,7 @@ def fetch_elective_batch(
             return graduate_service.fetch_batch(student_id, combined_cookie)
         except graduate_service.GraduateSessionExpiredError as exc:
             raise SchoolBatchSessionExpiredError(str(exc)) from exc
+    sent_at = time.monotonic()
     response = _school_request(
         "POST",
         f"student/{student_id}.do",
@@ -299,6 +306,7 @@ def fetch_elective_batch(
         token=token,
         cookie=combined_cookie,
     )
+    received_at = time.monotonic()
     response_text = response.text
     try:
         payload = response.json()
@@ -335,6 +343,10 @@ def fetch_elective_batch(
     normalized_name = str(batch_name)
     campus_code = str(response_data.get("campus") or "").strip()
     campus_name = str(response_data.get("campusName") or "").strip()
+    headers = getattr(response, "headers", {}) or {}
+    school_clock.observe(
+        headers.get("Date"), received_at, sent_at=sent_at, age_header=headers.get("Age")
+    )
     logger.info("Current enrollment batch: %s", normalized_name or "unknown")
     return ElectiveBatchResult(
         batch_code=normalized_code,
@@ -342,6 +354,97 @@ def fetch_elective_batch(
         campus_code=campus_code,
         campus_name=campus_name,
     )
+
+
+def _parse_school_start_time(value: Any) -> datetime:
+    """Parse common school time formats as an absolute instant."""
+    if isinstance(value, bool) or value in (None, ""):
+        raise SchoolStartTimeUnavailableError("学校尚未公布当前批次的开始时间")
+    try:
+        value = value.strip() if isinstance(value, str) else value
+        if isinstance(value, (int, float)) or (isinstance(value, str) and value.isdecimal()):
+            numeric = float(value)
+            if not math.isfinite(numeric) or numeric < 0:
+                raise ValueError("invalid timestamp")
+            if numeric > 10_000_000_000:
+                numeric /= 1000
+            parsed = datetime.fromtimestamp(numeric, UTC)
+        else:
+            if not isinstance(value, str) or not re.match(
+                r"^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}", value
+            ):
+                raise ValueError("a complete date and time is required")
+            parsed = datetime.fromisoformat(value.replace("/", "-"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=school_clock.BEIJING)
+        parsed = parsed.astimezone(UTC)
+        if not 2000 <= parsed.year <= 2100:
+            raise ValueError("timestamp out of range")
+        return parsed
+    except (TypeError, ValueError, OverflowError, OSError) as exc:
+        raise SchoolStartTimeUnavailableError("学校开始时间格式无效") from exc
+
+
+def fetch_undergraduate_start_time(batch_code: str, token: str, combined_cookie: str) -> datetime:
+    """Read ``elective/batch.do`` and select the current batch's beginTime."""
+    if not str(batch_code).strip() or not token or not combined_cookie:
+        raise SchoolStartTimeUnavailableError("请先登录并确认当前选课批次")
+    sent_at = time.monotonic()
+    response = _school_request(
+        "POST",
+        f"elective/batch.do?timestamp={int(time.time() * 1000)}",
+        read_only=True,
+        preference=config.BACKEND_PRIMARY,
+        timeout=REQUEST_TIMEOUT,
+        token=token,
+        cookie=combined_cookie,
+    )
+    received_at = time.monotonic()
+    response_text = response.text
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        if is_session_expired_response(status_code=response.status_code, text=response_text):
+            raise SchoolBatchSessionExpiredError("学校登录状态已过期") from exc
+        response.raise_for_status()
+        raise SchoolStartTimeUnavailableError("学校批次时间接口返回了非 JSON 响应") from exc
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if is_session_expired_response(status_code=response.status_code, code=code, text=response_text):
+        raise SchoolBatchSessionExpiredError("学校登录状态已过期")
+    response.raise_for_status()
+    if isinstance(code, bool) or code not in (None, "1", 1):
+        raise SchoolStartTimeUnavailableError("学校未能确认批次时间，请稍后重试")
+    rows = payload.get("dataList") if isinstance(payload, dict) else None
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list) or not rows:
+        raise SchoolStartTimeUnavailableError("学校尚未返回选课开始时间")
+    matching = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        nested_batch = row.get("electiveBatch")
+        nested_code = nested_batch.get("code") if isinstance(nested_batch, dict) else ""
+        codes = {
+            str(value).strip()
+            for value in (
+                row.get("code"),
+                row.get("batchCode"),
+                row.get("electiveBatchCode"),
+                nested_code,
+            )
+            if value is not None and str(value).strip()
+        }
+        if codes == {str(batch_code).strip()}:
+            matching.append(row)
+    if len(matching) != 1:
+        raise SchoolStartTimeUnavailableError("无法将学校开始时间与当前选课批次对应")
+    start = _parse_school_start_time(matching[0].get("beginTime"))
+    headers = getattr(response, "headers", {}) or {}
+    school_clock.observe(
+        headers.get("Date"), received_at, sent_at=sent_at, age_header=headers.get("Age")
+    )
+    return start
 
 
 def login(

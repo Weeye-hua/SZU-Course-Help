@@ -1891,6 +1891,106 @@ dialog::backdrop {
   background: var(--surface-soft);
 }
 
+.schedule-panel {
+  display: grid;
+  gap: 11px;
+  padding: 18px 26px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.schedule-panel[hidden] { display: none; }
+
+.schedule-heading,
+.schedule-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.schedule-heading strong { font-size: 14px; }
+
+.schedule-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.schedule-panel input[type="datetime-local"] {
+  width: min(100%, 280px);
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+}
+
+.schedule-confirm {
+  margin: 0;
+  font-size: 12px;
+}
+
+.schedule-actions { justify-content: flex-start; }
+
+.schedule-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.schedule-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.schedule-choice:has(input:checked) {
+  border-color: var(--brand);
+  background: var(--brand-tint);
+}
+
+.schedule-choice input {
+  margin: 2px 0 0;
+  accent-color: var(--brand);
+}
+
+.schedule-choice strong,
+.schedule-choice small { display: block; }
+.schedule-choice strong { color: var(--ink); font-size: 12px; }
+.schedule-choice small { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+
+.school-schedule-detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.school-schedule-detail[hidden],
+#customScheduleField[hidden] { display: none; }
+
+.schedule-school-time {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.school-schedule-detail .button { flex: 0 0 auto; }
+
 .enroll-controls-head,
 .mode-switcher,
 .enroll-control-actions,
@@ -1990,6 +2090,11 @@ dialog::backdrop {
 }
 
 @media (max-width: 640px) {
+  .schedule-panel { padding: 16px; }
+  .schedule-choices { grid-template-columns: minmax(0, 1fr); }
+  .school-schedule-detail { align-items: flex-start; flex-direction: column; }
+  .schedule-actions { flex-direction: column; align-items: stretch; }
+  .schedule-actions .button { width: 100%; }
   .enroll-controls {
     padding: 16px;
   }

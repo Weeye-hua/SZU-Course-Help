@@ -3,13 +3,30 @@
 from __future__ import annotations
 
 import gc
+import threading
 
 import pytest
 import requests
 
 import database
 import logic
-from services import auth_service, course_cache_service
+from services import auth_service, course_cache_service, scheduled_enroll, school_clock
+
+
+@pytest.fixture(autouse=True)
+def isolate_schedules(monkeypatch):
+    """No appointment thread or clock sample may leak into another test."""
+    scheduled_enroll.startup()
+    scheduled_enroll.cancel()
+    school_clock.reset()
+    yield
+    scheduled_enroll.cancel()
+    for thread in threading.enumerate():
+        if thread.name == "scheduled-enrollment":
+            thread.join(timeout=3)
+            assert not thread.is_alive(), "Appointment test left a live worker"
+    scheduled_enroll.startup()
+    school_clock.reset()
 
 
 @pytest.fixture(autouse=True)

@@ -7,6 +7,8 @@ import math
 import re
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -19,7 +21,7 @@ from campus import (
     get_campus,
 )
 from school_password import encrypt_school_password
-from services import backend_service, graduate_service
+from services import backend_service, graduate_service, scheduled_enroll, school_clock
 from services.session_manager import session_manager
 from study_program import is_graduate, program_payload
 
@@ -30,6 +32,7 @@ _state_lock = threading.RLock()
 _automatic_relogin_worker_lock = threading.Lock()
 _automatic_relogin_worker: threading.Thread | None = None
 _session_generation = 0
+_account_generation = 0
 _relogin_state: dict[str, str | int | float] = {
     "status": "idle",
     "message": "",
@@ -43,6 +46,13 @@ _relogin_state: dict[str, str | int | float] = {
 
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+@contextmanager
+def session_state_guard() -> Iterator[None]:
+    """Serialize short account mutations and task launches, never network I/O."""
+    with _state_lock:
+        yield
 
 
 def _reset_relogin_state_locked() -> None:
@@ -210,6 +220,14 @@ def _advance_session_generation() -> None:
     _session_generation += 1
 
 
+def _bind_student_id_locked(student_id: str) -> None:
+    global _account_generation
+    if str(config.student_id or "") != student_id:
+        _account_generation += 1
+        scheduled_enroll.cancel(message="登录账号已变化，原预约已取消")
+    config.student_id = student_id
+
+
 def save_login_state(
     login_cookie: str,
     captcha_cookie: str,
@@ -233,7 +251,7 @@ def save_login_state(
             else f"{login_cookie}; {captcha_cookie}"
         )
         config.token = str(token)
-        config.student_id = str(student_id)
+        _bind_student_id_locked(str(student_id))
         config.password = password
         config.elective_batch_code = ""
         config.elective_batch_name = ""
@@ -249,7 +267,11 @@ def save_login_state(
 
 def clear_login_state() -> None:
     """Clear credentials and all school-session state."""
+    global _account_generation
     with _state_lock:
+        _account_generation += 1
+        scheduled_enroll.cancel(message="已退出登录，预约已取消")
+        school_clock.reset()
         config.combined_cookie = ""
         config.webvpn_cookie = ""
         config.authserver_cookie = ""
@@ -303,6 +325,7 @@ def get_session_snapshot() -> dict[str, str | bool | int]:
             **(graduate_service.window_payload() if is_graduate() else {}),
             "logged_in": bool(config.token and config.combined_cookie),
             "student_id": str(config.student_id or ""),
+            "account_generation": _account_generation,
             "batch_code": str(config.elective_batch_code or ""),
             "batch_name": str(config.elective_batch_name or ""),
             "campus_code": "" if is_graduate() else str(config.campus_code or DEFAULT_CAMPUS_CODE),
@@ -411,7 +434,7 @@ def attempt_ocr_relogin(
     """Solve a fresh captcha using one explicit login-page credential context."""
     with _state_lock:
         if student_id is not None:
-            config.student_id = str(student_id).strip()
+            _bind_student_id_locked(str(student_id).strip())
         if password is not None:
             config.password = str(password)
         if backend is not None:
@@ -427,14 +450,20 @@ def attempt_automatic_relogin(
     student_id: str | None = None,
     password: str | None = None,
     backend: str | None = None,
+    expected_account: tuple[str, int] | None = None,
 ) -> tuple[bool, str]:
     """Run the login-page OCR flow with the process-owned credential context."""
     with _state_lock:
+        if expected_account is not None and expected_account != (
+            str(config.student_id or ""),
+            _account_generation,
+        ):
+            return False, "登录账号已变化，已取消本次自动恢复"
         if student_id is not None:
             normalized_student_id = str(student_id).strip()
             if not re.fullmatch(r"\d{6,12}", normalized_student_id):
                 return False, "浏览器会话中的自动登录凭据无效"
-            config.student_id = normalized_student_id
+            _bind_student_id_locked(normalized_student_id)
         if password is not None:
             normalized_password = str(password)
             if not normalized_password.strip() or len(normalized_password) > 256:
@@ -449,6 +478,11 @@ def attempt_automatic_relogin(
 
     with session_manager.recovery_guard():
         with _state_lock:
+            if expected_account is not None and expected_account != (
+                str(config.student_id or ""),
+                _account_generation,
+            ):
+                return False, "登录账号已变化，已取消本次自动恢复"
             if (
                 _session_generation != observed_generation
                 and config.token
@@ -572,7 +606,7 @@ def start_automatic_relogin(
                     or len(normalized_password) > 256
                 ):
                     return False, "浏览器会话中的自动登录凭据无效"
-                config.student_id = normalized_student_id
+                _bind_student_id_locked(normalized_student_id)
                 config.password = normalized_password
                 if backend is not None:
                     config.backend_preference = backend_service.set_preference(backend)
@@ -631,6 +665,7 @@ __all__ = [
     "refresh_elective_batch",
     "automatic_relogin_available",
     "save_login_state",
+    "session_state_guard",
     "start_automatic_relogin",
     "set_current_campus",
     "validate_login_params",

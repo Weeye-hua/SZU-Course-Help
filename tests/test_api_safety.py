@@ -41,7 +41,7 @@ def test_startup_hook_starts_one_session_coordinator_without_disk_restore(monkey
     asyncio.run(app.startup_runtime_services())
     asyncio.run(app.startup_runtime_services())
 
-    assert started == [(app._keep_alive_once, app.is_enroll_task_running, 60)]
+    assert started == [(app._keep_alive_once, app._has_session_work, 60)]
     assert app._runtime_started is True
 
 
