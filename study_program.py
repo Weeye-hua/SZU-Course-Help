@@ -22,6 +22,8 @@ def is_graduate() -> bool:
 
 
 def program_payload() -> dict:
+    from services import backend_service
+
     graduate = is_graduate()
     return {
         "program": current_program(),
@@ -31,5 +33,5 @@ def program_payload() -> dict:
         "supports_webvpn": not graduate,
         "school_url": GRADUATE_BASE_URL + "*default/index.do"
         if graduate
-        else "http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do",
+        else backend_service.session_profile().referer,
     }

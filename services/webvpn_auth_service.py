@@ -1,4 +1,4 @@
-"""Ephemeral controlled-browser authentication for read-only WebVPN fallback."""
+"""Ephemeral controlled-browser authentication for off-campus school access."""
 
 from __future__ import annotations
 

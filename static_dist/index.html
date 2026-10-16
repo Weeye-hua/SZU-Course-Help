@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260924.3">
+  <link rel="stylesheet" href="/styles.css?build=20261016.1">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -19,18 +19,18 @@
     </a>
     <div class="topbar-actions">
       <span id="taskIndicator" class="task-indicator" hidden>抢课中</span>
-      <span id="backendIndicator" class="backend-indicator">当前后端：主站</span>
+      <span id="backendIndicator" class="backend-indicator" role="status" aria-live="polite">访问入口：正在读取…</span>
       <button id="studentLabel" class="student-label" type="button" title="点击立即尝试自动重新登录">未登录</button>
       <button id="openMyCourses" class="button button-quiet" type="button">我的课程</button>
       <button id="openCart" class="button button-secondary cart-button" type="button">
         <span class="cart-label-long">选课清单</span><span class="cart-label-short">清单</span>
         <span id="cartCount" class="count-badge">0</span>
       </button>
-      <!-- 固定公开入口：不含本地令牌或学校会话，浏览器直接打开即可，无需后端代启动。 -->
+      <!-- 公开入口随当前访问模式更新，不含本地令牌或学校会话。 -->
       <a
         id="openSchoolRaw"
         class="button button-quiet"
-        href="http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
+        href="https://bkxk.webvpn.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
         target="_blank"
         rel="noopener noreferrer"
         >学校原始页面</a
@@ -349,6 +349,6 @@
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script src="/schedule-parser.js?build=20260901.1" defer></script>
-  <script src="/course-app.js?build=20260924.3" defer></script>
+  <script src="/course-app.js?build=20261016.1" defer></script>
 </body>
 </html>

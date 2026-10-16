@@ -121,6 +121,7 @@ const appElements = {
   refreshPhase: document.querySelector("#refreshPhase"),
   studentLabel: document.querySelector("#studentLabel"),
   taskIndicator: document.querySelector("#taskIndicator"),
+  backendIndicator: document.querySelector("#backendIndicator"),
   sessionRecoveryBanner: document.querySelector("#sessionRecoveryBanner"),
   recoveryTitle: document.querySelector("#recoveryTitle"),
   recoveryDetail: document.querySelector("#recoveryDetail"),
@@ -1054,6 +1055,8 @@ function setPhasePresentation() {
 }
 
 function applyProgramPresentation(session) {
+  const official = document.querySelector("#openSchoolRaw");
+  if (official && session.school_url) official.href = session.school_url;
   const graduate = session.program === "graduate";
   if (graduate && appState.program !== "graduate") {
     appState.program = "graduate";
@@ -1075,9 +1078,22 @@ function applyProgramPresentation(session) {
     document.querySelector("#enrollPhaseNotice").textContent = "研究生选课仅在学校公布的开放时间内运行。";
     document.querySelector("#enrollPhaseLabel").textContent = "我已确认学校当前开放研究生选课";
     document.querySelector(".topbar .brand-lockup small").textContent = "研究生选课";
-    const official = document.querySelector("a[href*='bkxk.szu.edu.cn']");
-    if (official) official.href = session.school_url;
   }
+}
+
+function renderBackendIndicator(session) {
+  if (!appElements.backendIndicator) return;
+  const preference = session.preference;
+  const backend = preference === "auto" ? session.active_backend : preference || session.active_backend;
+  let label = "正在读取…";
+  if (session.program === "graduate") {
+    label = "研究生主站";
+  } else if (backend === "webvpn") {
+    label = `WebVPN（校外，${session.webvpn_authenticated ? "已认证" : "待认证"}）`;
+  } else if (backend === "primary") {
+    label = "主站";
+  }
+  appElements.backendIndicator.textContent = `访问入口：${label}`;
 }
 
 function applySessionData(session) {
@@ -1094,6 +1110,7 @@ function applySessionData(session) {
     session.scheduled_enrollment = acceptSchedule(session.scheduled_enrollment);
   }
   appElements.schedulePanel.hidden = appState.program === "graduate";
+  renderBackendIndicator(session);
   const previousReloginStatus = appState.lastReloginStatus;
   const previousCatalogScope = catalogScopeKey(appState.session);
   const nextCatalogScope = catalogScopeKey(session);

@@ -7,7 +7,7 @@ must remain wire-compatible.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 
@@ -37,7 +37,7 @@ class CatalogRequestContext:
     batch_code: str
     token: str
     cookie: str
-    backend_preference: str = config.BACKEND_AUTO
+    backend_preference: str = field(default_factory=backend_service.get_preference)
 
     def __post_init__(self) -> None:
         if not all((self.student_id, self.campus_code, self.batch_code, self.token, self.cookie)):
@@ -46,18 +46,16 @@ class CatalogRequestContext:
 
 def get_headers() -> dict[str, str]:
     """Build headers from the latest in-memory school session."""
+    profile = backend_service.session_profile()
     return {
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Cookie": config.combined_cookie,
-        "Host": "bkxk.szu.edu.cn",
-        "Origin": "http://bkxk.szu.edu.cn",
-        "Referer": (
-            "http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/"
-            f"*default/grablessons.do?token={config.token}"
-        ),
+        "Cookie": backend_service.cookie_header(profile),
+        "Host": profile.host,
+        "Origin": profile.origin,
+        "Referer": f"{profile.base_url}*default/grablessons.do?token={config.token}",
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
         "X-Requested-With": "XMLHttpRequest",
         "token": config.token,

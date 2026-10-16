@@ -32,14 +32,15 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
 # ====================================================================
 SCHOOL_BASE_URL = "http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/"
 
-# Runtime backend selection.  ``auto`` always tries the primary backend first
-# for each request; the active backend is the last backend that completed a
-# request successfully.
+# This off-campus adaptation defaults to WebVPN. The active backend starts at
+# the selected default and is then updated after successful school requests.
+# Users can still explicitly choose primary or auto for on-campus access.
 BACKEND_AUTO = "auto"
 BACKEND_PRIMARY = "primary"
 BACKEND_WEBVPN = "webvpn"
-backend_preference = BACKEND_AUTO
-active_backend = BACKEND_PRIMARY
+DEFAULT_BACKEND = BACKEND_WEBVPN
+backend_preference = DEFAULT_BACKEND
+active_backend = DEFAULT_BACKEND
 
 # ====================================================================
 # 用户登录凭据（命令行模式使用，Web UI 模式下由前端传入）

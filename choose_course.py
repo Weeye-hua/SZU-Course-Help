@@ -46,9 +46,8 @@ def _school_request(
         cookie=cookie,
         timeout=timeout,
         read_only=read_only,
-        # WebVPN is a read-only fallback. Enrollment and withdrawal always use
-        # the primary school endpoint, even if a prior query used WebVPN.
-        preference=None if read_only else config.BACKEND_PRIMARY,
+        # Writes use the explicit selection and never inherit a query fallback.
+        preference=None if read_only else backend_service.session_profile().key,
     )
 
 
@@ -177,7 +176,7 @@ def submit_course_selection(
         "elective/volunteer.do",
         data=form_data,
         token=config.token,
-        cookie=backend_service.cookie_header(backend_service.get_profile(config.BACKEND_PRIMARY)),
+        cookie=config.combined_cookie,
     )
 
 

@@ -31,7 +31,7 @@ import database
 from campus import DEFAULT_CAMPUS_CODE, campus_name
 from course_models import priority_group_key, time_signature
 from school_session import is_session_expired_response
-from services import cart_service
+from services import backend_service, cart_service
 from services.auth_service import (
     attempt_automatic_relogin,
 )
@@ -847,6 +847,17 @@ def _record_business_failure(
         )
 
 
+def _pause_for_webvpn_auth(course: EnrollmentCourse) -> GrabOutcome:
+    """Keep the queue intact until the user restores the separate gateway session."""
+    reason = (
+        "WebVPN 统一认证未完成或已过期，任务已保护性暂停；"
+        "请先停止任务、退出登录，再在登录页完成 WebVPN 统一认证"
+    )
+    _update_course_progress(course.id, message=reason)
+    pause_enroll_task(reason, source="webvpn_auth_required")
+    return GrabOutcome.PAUSED
+
+
 def _active_course_ids() -> set:
     """从数据库读取仍需抢课（未成功/未失败）的课程 id 集合。"""
     stored = {item["id"]: item for item in cart_service.get_courses_by_status("")}
@@ -925,7 +936,10 @@ def _scan_course_available(course) -> int:
             if not listed_courses or page + 1 >= max(1, math.ceil(total_count / 10)):
                 break
             page += 1
-    except choose_course.SchoolSessionExpiredError:
+    except (
+        choose_course.SchoolSessionExpiredError,
+        backend_service.WebVPNAuthenticationRequiredError,
+    ):
         raise
     except Exception as exc:
         logger.info("Scan query failed for %s: %s", course.name, exc)
@@ -1126,6 +1140,8 @@ def grab_courses(courses: list) -> GrabOutcome:
                 _update_course_progress(course.id, message="扫描课程目录，等待课程放课")
                 try:
                     available_slots = _scan_course_available(course)
+                except backend_service.WebVPNAuthenticationRequiredError:
+                    return _pause_for_webvpn_auth(course)
                 except choose_course.SchoolSessionExpiredError:
                     _add_event("warn", "扫描目录时检测到登录已过期，准备自动重新登录")
                     return GrabOutcome.SESSION_EXPIRED
@@ -1278,6 +1294,8 @@ def grab_courses(courses: list) -> GrabOutcome:
                     ):
                         return GrabOutcome.PAUSED
                     continue
+            except backend_service.WebVPNAuthenticationRequiredError:
+                return _pause_for_webvpn_auth(course)
             except choose_course.SchoolSessionExpiredError:
                 _add_event("warn", "检测到登录已过期，准备自动重新登录")
                 return GrabOutcome.SESSION_EXPIRED

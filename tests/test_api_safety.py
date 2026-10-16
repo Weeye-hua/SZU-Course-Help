@@ -197,6 +197,51 @@ def test_school_proxy_route_is_explicitly_disabled():
     assert mutating.json()["error_code"] == "SCHOOL_PROXY_DISABLED"
 
 
+def test_official_school_link_follows_webvpn_preference(monkeypatch):
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_WEBVPN)
+    opened = []
+    monkeypatch.setattr(app, "open_external_url", lambda url: opened.append(url) or True)
+
+    response = client.post("/api/school/open")
+
+    expected = "https://bkxk.webvpn.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
+    assert response.status_code == 200
+    assert response.json()["url"] == expected
+    assert opened == [expected]
+
+
+def test_login_reports_expired_webvpn_authentication(monkeypatch):
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_WEBVPN)
+    monkeypatch.setattr(
+        config,
+        "webvpn_cookie",
+        "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+    )
+    monkeypatch.setattr(app, "verify_card_key", lambda *_: True)
+    monkeypatch.setattr(app, "is_enroll_task_running", lambda: False)
+
+    def expired_gateway(*_args):
+        raise app.backend_service.WebVPNAuthenticationRequiredError("expired gateway")
+
+    monkeypatch.setattr(app, "perform_school_login", expired_gateway)
+    response = client.post(
+        "/api/login",
+        json={
+            "student_id": "2024110122",
+            "password": "school-password",
+            "card_key": "test-card-key",
+            "backend": "webvpn",
+            "vtoken": "vtoken",
+            "verifyCode": [[10, 30], [40, 40], [80, 50], [120, 60]],
+            "cookie": "route=fresh; Path=/, insert_cookie=fresh; Path=/",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "WEBVPN_AUTH_REQUIRED"
+    assert response.json()["retryable"] is True
+
+
 def test_card_key_is_terminal_prefilled_and_has_no_web_issuance_endpoint():
     app.configure_runtime_prefill("2024110122", "SZU3.terminal-only")
     try:
@@ -702,6 +747,7 @@ def test_login_route_validates_real_card_key_and_saves_mocked_school_session(tmp
             "student_id": "2024110122",
             "password": "school-password",
             "card_key": card_key,
+            "backend": "primary",
             "vtoken": "vtoken",
             "verifyCode": [[10, 30], [40, 40], [80, 50], [120, 60]],
             "cookie": "route=route-value; Path=/, insert_cookie=insert-value; Path=/",
@@ -1258,6 +1304,7 @@ def test_captcha_solve_returns_empty_when_ocr_fails(monkeypatch, tmp_path):
 
 
 def test_school_open_success_response_keeps_public_url(monkeypatch):
+    monkeypatch.setattr(config, "backend_preference", config.DEFAULT_BACKEND)
     monkeypatch.setattr(app, "open_external_url", lambda url: True)
 
     response = client.post("/api/school/open")
@@ -1270,6 +1317,7 @@ def test_school_open_success_response_keeps_public_url(monkeypatch):
 
 
 def test_school_open_failure_response_keeps_public_url(monkeypatch):
+    monkeypatch.setattr(config, "backend_preference", config.DEFAULT_BACKEND)
     monkeypatch.setattr(app, "open_external_url", lambda url: False)
 
     response = client.post("/api/school/open")

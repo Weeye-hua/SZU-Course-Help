@@ -8,9 +8,16 @@ import threading
 import pytest
 import requests
 
+import config
 import database
 import logic
-from services import auth_service, course_cache_service, scheduled_enroll, school_clock
+from services import (
+    auth_service,
+    backend_service,
+    course_cache_service,
+    scheduled_enroll,
+    school_clock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +40,17 @@ def isolate_schedules(monkeypatch):
 def isolate_captcha_files(monkeypatch, tmp_path):
     """Never overwrite a running user's captcha while exercising OCR helpers."""
     monkeypatch.setattr(logic, "_captcha_image_path", lambda: tmp_path / "captcha.jpg")
+
+
+@pytest.fixture(autouse=True)
+def isolate_school_backend(monkeypatch):
+    """Legacy school mocks use primary; WebVPN tests explicitly opt into the gateway."""
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_PRIMARY)
+    monkeypatch.setattr(config, "active_backend", config.BACKEND_PRIMARY)
+    monkeypatch.setattr(config, "webvpn_cookie", "")
+    backend_service.clear_primary_cooldown()
+    yield
+    backend_service.clear_primary_cooldown()
 
 
 @pytest.fixture(autouse=True)

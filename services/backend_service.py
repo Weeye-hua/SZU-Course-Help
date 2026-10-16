@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -49,27 +49,45 @@ class WebVPNAuthenticationRequiredError(RuntimeError):
     """Raised when a WebVPN request has no authenticated WebVPN cookie set."""
 
 
-WEBVPN_AUTH_MESSAGE = "WebVPN 统一认证未完成或已过期，请重新认证；通常也可切回主站直连"
+WEBVPN_AUTH_MESSAGE = (
+    "WebVPN 统一认证未完成或认证已过期，请先停止任务并退出登录，再重新完成统一认证"
+)
 
 
 def _gateway_login_response(response: Any, profile: BackendProfile) -> bool:
-    headers = getattr(response, "headers", {}) or {}
-    location = str(headers.get("Location", "") or "")
-    host = urlsplit(urljoin(profile.base_url, location)).hostname if location else ""
-    if host in {WEBVPN_ROOT_HOST, AUTHSERVER_HOST, "authserver.szu.edu.cn"}:
+    if _webvpn_auth_redirect(response, profile.base_url):
         return True
+    headers = getattr(response, "headers", {}) or {}
+    location = headers.get("Location") or headers.get("location")
+    if isinstance(location, str) and getattr(response, "status_code", 0) in {
+        301,
+        302,
+        303,
+        307,
+        308,
+    }:
+        target = urlsplit(urljoin(profile.base_url, location))
+        if target.hostname == WEBVPN_ROOT_HOST and target.path in {"", "/"}:
+            return True
     text = str(getattr(response, "text", "") or "")[:32768].lower()
     # A school-session expiry alone is not a gateway expiry.
-    return ("webvpn" in text or AUTHSERVER_HOST in text) and any(
-        marker in text
-        for marker in (
-            "统一认证",
-            "扫码",
-            "未登录",
-            "认证过期",
-            "cas/login",
-            'type="password"',
-            "type='password'",
+    is_html = "text/html" in str(headers.get("Content-Type", "")).lower() or (
+        text.lstrip().startswith(("<html", "<!doctype html"))
+    )
+    return (
+        is_html
+        and ("webvpn" in text or AUTHSERVER_HOST in text)
+        and any(
+            marker in text
+            for marker in (
+                "统一认证",
+                "扫码",
+                "未登录",
+                "认证过期",
+                "cas/login",
+                'type="password"',
+                "type='password'",
+            )
         )
     )
 
@@ -84,7 +102,7 @@ BACKENDS: dict[str, BackendProfile] = {
     ),
     config.BACKEND_WEBVPN: BackendProfile(
         key=config.BACKEND_WEBVPN,
-        label="WebVPN 备用",
+        label="WebVPN 校外",
         scheme="https",
         host=WEBVPN_HOST,
         base_url=f"https://{WEBVPN_HOST}/xsxkapp/sys/xsxkapp/",
@@ -103,8 +121,8 @@ _UA = (
 
 
 def normalize_preference(value: str | None) -> str:
-    value = str(value or config.BACKEND_AUTO).strip().lower()
-    return value if value in BACKENDS or value == config.BACKEND_AUTO else config.BACKEND_AUTO
+    value = str(value or config.DEFAULT_BACKEND).strip().lower()
+    return value if value in BACKENDS or value == config.BACKEND_AUTO else config.DEFAULT_BACKEND
 
 
 def set_preference(value: str | None) -> str:
@@ -114,11 +132,24 @@ def set_preference(value: str | None) -> str:
 
 
 def get_preference() -> str:
-    return normalize_preference(getattr(config, "backend_preference", config.BACKEND_AUTO))
+    return normalize_preference(getattr(config, "backend_preference", config.DEFAULT_BACKEND))
 
 
 def get_profile(key: str) -> BackendProfile:
     return BACKENDS[normalize_preference(key)]
+
+
+def session_profile() -> BackendProfile:
+    """Pin authentication and writes to the explicitly selected school backend.
+
+    Auto mode keeps using primary for these operations, even after a query
+    falls back to WebVPN. Explicit WebVPN mode keeps the entire login and
+    enrollment flow on the off-campus endpoint.
+    """
+    preference = get_preference()
+    return BACKENDS[
+        config.BACKEND_WEBVPN if preference == config.BACKEND_WEBVPN else config.BACKEND_PRIMARY
+    ]
 
 
 def candidate_profiles(
@@ -155,8 +186,8 @@ def clear_primary_cooldown() -> None:
 
 def active_profile() -> BackendProfile:
     return BACKENDS.get(
-        getattr(config, "active_backend", config.BACKEND_PRIMARY),
-        BACKENDS[config.BACKEND_PRIMARY],
+        getattr(config, "active_backend", config.DEFAULT_BACKEND),
+        BACKENDS[config.DEFAULT_BACKEND],
     )
 
 
@@ -248,6 +279,46 @@ def should_fail_over(response: Any) -> bool:
     return int(getattr(response, "status_code", 0) or 0) in TRANSIENT_STATUS_CODES
 
 
+def _is_webvpn_auth_url(url: str) -> bool:
+    """Recognize gateway/CAS login targets without inspecting response bodies."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = str(parsed.hostname or "").lower()
+    path = parsed.path.split(";", 1)[0].rstrip("/")
+    if host in {AUTHSERVER_HOST, "authserver.szu.edu.cn"}:
+        return path == "/authserver/login"
+    return host in {WEBVPN_ROOT_HOST, WEBVPN_HOST} and path in {
+        "/login",
+        "/users/sign_in",
+        "/users/auth/cas",
+        "/users/auth/cas/callback",
+    }
+
+
+def _webvpn_auth_redirect(response: Any, request_url: str) -> bool:
+    """Detect both unfollowed redirects and requests' already-followed chains."""
+    history = getattr(response, "history", None)
+    responses = [*history, response] if isinstance(history, (list, tuple)) else [response]
+    for item in responses:
+        response_url = getattr(item, "url", None)
+        base_url = response_url if isinstance(response_url, str) and response_url else request_url
+        if _is_webvpn_auth_url(base_url):
+            return True
+        if getattr(item, "status_code", None) not in {301, 302, 303, 307, 308}:
+            continue
+        headers = getattr(item, "headers", None)
+        if not isinstance(headers, Mapping):
+            continue
+        location = headers.get("Location") or headers.get("location")
+        if isinstance(location, str) and _is_webvpn_auth_url(urljoin(base_url, location)):
+            return True
+    return False
+
+
 def request_with_failover(
     method: str,
     path: str,
@@ -279,13 +350,14 @@ def request_with_failover(
         if profile.key == config.BACKEND_WEBVPN and not has_webvpn_cookies():
             raise WebVPNAuthenticationRequiredError(WEBVPN_AUTH_MESSAGE)
         gateway_snapshot = str(config.webvpn_cookie or "")
+        request_url = f"{profile.base_url}{normalized_path}"
         try:
             # A school-cookie omission must not drop the WebVPN gateway cookie:
             # it authenticates the gateway itself, not the school session
             # (issue #9). On the primary profile the header is dropped whole.
             gateway_cookie = _gateway_cookie_for_omit(profile) if omit_cookie else ""
             response = sender(
-                url=f"{profile.base_url}{normalized_path}",
+                url=request_url,
                 method=method.upper(),
                 data=data,
                 params=params,
@@ -301,6 +373,9 @@ def request_with_failover(
                     extra=extra_headers,
                 ),
                 timeout=timeout,
+                # Inspect the first gateway redirect before requests can send
+                # the school token (or replay a POST body on 307/308) to CAS.
+                # Preserve the primary backend's existing transport contract.
                 **({"allow_redirects": False} if profile.key == config.BACKEND_WEBVPN else {}),
             )
         except requests.RequestException as exc:
@@ -505,4 +580,5 @@ __all__ = [
     "request_with_failover",
     "rewrite_referer_for_profile",
     "set_preference",
+    "session_profile",
 ]
