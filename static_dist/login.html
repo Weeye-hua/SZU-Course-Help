@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>登录 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260924.3">
+  <link rel="stylesheet" href="/styles.css?build=20261016.1">
 </head>
 <body class="login-page">
   <section class="login-visual" aria-label="深大抢课助手">
@@ -47,22 +47,18 @@
         </label>
 
         <fieldset class="backend-fieldset">
-          <legend>访问后端</legend>
+          <legend>访问入口</legend>
           <div class="backend-options">
             <label class="backend-option">
-              <input type="radio" name="backend" value="auto" checked>
-              <span><strong>自动</strong><small>主站优先，只读查询可回退 WebVPN</small></span>
-            </label>
-            <label class="backend-option">
               <input type="radio" name="backend" value="primary">
-              <span><strong>主站直连</strong><small>校内 / 校外通用</small></span>
+              <span><strong>主站</strong><small>直接访问 bkxk.szu.edu.cn</small></span>
             </label>
             <label class="backend-option">
-              <input type="radio" name="backend" value="webvpn">
-              <span><strong>WebVPN 备用</strong><small>仅验证码与只读查询；登录、选课仍走主站</small></span>
+              <input type="radio" name="backend" value="webvpn" checked>
+              <span><strong>WebVPN（校外）</strong><small>统一认证后，登录、查询和选课均走校外入口</small></span>
             </label>
           </div>
-          <div id="backendStatus" class="backend-status" role="status" aria-live="polite">当前后端：自动（优先主站）</div>
+          <div id="backendStatus" class="backend-status" role="status" aria-live="polite">访问入口：WebVPN（校外，待认证）</div>
           <button id="webvpnAuthButton" class="button button-quiet button-block" type="button" hidden>完成 WebVPN 统一认证</button>
         </fieldset>
 
@@ -111,6 +107,6 @@
   </main>
 
   <noscript>此页面需要启用 JavaScript。</noscript>
-  <script src="/login.js?build=20260924.3" defer></script>
+  <script src="/login.js?build=20261016.1" defer></script>
 </body>
 </html>

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 import app
 
@@ -96,6 +100,7 @@ def test_login_captcha_ui_has_terminal_failure_states():
     assert 'const webvpnFallback = status === "webvpn-auth-required";' in script
     assert 'status !== "ready" && status !== "loading"' not in script
     assert "loginState.selectingBackend" in script
+    assert 'code === "WEBVPN_AUTH_REQUIRED"' in script
     assert "loginState.captcha = null" in script
     assert "当前选择 WebVPN，但验证码暂时无法获取，请先完成统一认证" in script
     assert "loginElements.captchaActions.hidden = webvpnFallback" in script
@@ -317,7 +322,7 @@ def test_cart_auto_enroll_checkbox_reconciles_server_state():
 
 
 def test_school_raw_entry_is_a_real_public_link():
-    """The fixed public school entry opens directly in the user's browser.
+    """The public entry stays usable and follows the active program/backend.
 
     A real anchor always works — the workbench itself runs in a browser — so
     the desktop opener chain (xdg-open → kde-open) cannot break this entry,
@@ -330,6 +335,193 @@ def test_school_raw_entry_is_a_real_public_link():
     assert f'href="{app.OFFICIAL_SCHOOL_HOME_URL}"' in course
     assert 'target="_blank"' in course
     assert 'rel="noopener noreferrer"' in course
+    assert 'document.querySelector("#openSchoolRaw")' in script
+    assert "if (official && session.school_url) official.href = session.school_url;" in script
     # The old backend-spawn path is gone from the frontend.
     assert "openSchoolRawPage" not in script
     assert "/api/school/open" not in script
+
+
+def test_workbench_backend_indicator_follows_session_runtime():
+    course = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "当前后端：主站" not in course
+    assert "访问入口：正在读取…" in course
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is needed for the frontend behavior test")
+    result = subprocess.run(
+        [node, "-"],
+        input=r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("static_dist/course-app.js", "utf8")
+  .replace(/\ninitializeApp\(\);\s*$/, "");
+const nodes = new Map();
+function node(key) {
+  if (!nodes.has(key)) nodes.set(key, {
+    hidden: false, disabled: false, textContent: "", value: "", dataset: {},
+    classList: { toggle() {}, add() {}, remove() {} }, addEventListener() {},
+  });
+  return nodes.get(key);
+}
+vm.runInNewContext(source + `
+  applyProgramPresentation = () => {};
+  catalogScopeKey = () => "";
+  renderCampusOptions = () => {};
+  renderSessionRecovery = () => {};
+  hideSessionDialog = () => {};
+  updateTaskIndicator = () => {};
+  setPhasePresentation = () => {};
+  renderSchedule = () => {};
+  for (const [session, expected] of [
+    [{ preference: "webvpn", active_backend: "primary", webvpn_authenticated: false },
+      "访问入口：WebVPN（校外，待认证）"],
+    [{ preference: "webvpn", active_backend: "webvpn", webvpn_authenticated: true },
+      "访问入口：WebVPN（校外，已认证）"],
+    [{ preference: "auto", active_backend: "primary" }, "访问入口：主站"],
+    [{ preference: "auto", active_backend: "webvpn", webvpn_authenticated: true },
+      "访问入口：WebVPN（校外，已认证）"],
+    [{ preference: "primary", active_backend: "webvpn" }, "访问入口：主站"],
+    [{ program: "graduate", preference: "primary" }, "访问入口：研究生主站"],
+    [{ active_backend: "webvpn" }, "访问入口：WebVPN（校外，待认证）"],
+    [{}, "访问入口：正在读取…"],
+  ]) {
+    applySessionData(session);
+    assert.equal(appElements.backendIndicator.textContent, expected);
+  }
+`, {
+  assert, console,
+  document: { querySelector: node, querySelectorAll: () => [] },
+  window: { setInterval() {} },
+});
+""",
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        cwd=ROOT,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_webvpn_login_controls_and_backend_switch_runtime():
+    """Default to WebVPN and never reuse a captcha after a backend switch."""
+    login = (STATIC / "login.html").read_text(encoding="utf-8")
+    assert 'name="backend" value="webvpn" checked' in login
+    assert 'name="backend" value="auto"' not in login
+    assert login.count('type="radio" name="backend"') == 2
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is needed for the frontend behavior test")
+    result = subprocess.run(
+        [node, "-"],
+        input=r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("static_dist/login.js", "utf8")
+  .replace(/\ninitializeLogin\(\);\s*$/, "");
+const nodes = new Map();
+function node(key) {
+  if (!nodes.has(key)) nodes.set(key, {
+    hidden: false, disabled: false, textContent: "", value: "", dataset: {},
+    classList: { toggle() {} }, addEventListener() {}, setAttribute() {},
+    removeAttribute(name) { delete this[name]; }, replaceChildren() {},
+    querySelector(selector) { return node(key + selector); },
+  });
+  return nodes.get(key);
+}
+const radios = [node("radio-primary"), node("radio-webvpn")];
+const context = {
+  assert, console, URL, AbortController,
+  document: { querySelector: node, querySelectorAll: () => radios },
+  window: { setTimeout, clearTimeout },
+};
+vm.runInNewContext(source + `
+(async () => {
+  assert.equal(loginState.backend, "webvpn");
+  assert.equal(selectedBackend(), "webvpn");
+  const originalLoadCaptcha = loadCaptcha;
+  let requestedBackend;
+  loadCaptcha = async () => { requestedBackend = loginState.backend; };
+  for (const [bootstrap, expected] of [
+    [{}, "webvpn"],
+    [{ preference: "auto", active_backend: "primary" }, "webvpn"],
+    [{ preference: "primary" }, "primary"],
+    [{ program: "graduate" }, "primary"],
+  ]) {
+    loginState.backend = "webvpn";
+    requestJson = async url => url === "/api/bootstrap" ? bootstrap : { logged_in: false };
+    await initializeLogin();
+    assert.equal(requestedBackend, expected);
+    assert.equal(loginState.backend, expected);
+    assert.equal(document.querySelector("input[name='backend'][value='" + expected + "']").checked, true);
+  }
+  loadCaptcha = originalLoadCaptcha;
+  loginState.program = "undergraduate";
+  setBackendPresentation({ preference: "webvpn", active_backend_label: "主站" });
+  assert.equal(loginElements.backendStatus.textContent, "访问入口：WebVPN（校外，待认证）");
+  setBackendPresentation({ preference: "webvpn", webvpn_authenticated: true });
+  assert.equal(loginElements.backendStatus.textContent, "访问入口：WebVPN（校外，已认证）");
+  loginState.backend = "webvpn";
+  setCaptchaStatus("unavailable");
+  assert.equal(loginElements.captchaActions.hidden, false);
+  assert.equal(loginElements.captchaWebvpnAuth.hidden, true);
+  setCaptchaStatus("webvpn-auth-required");
+  assert.equal(loginElements.captchaActions.hidden, true);
+  assert.equal(loginElements.captchaWebvpnAuth.hidden, false);
+
+  for (const authenticated of [false, true]) {
+    loginState.backend = "primary";
+    loginState.captcha = null;
+    loginState.captchaRequest = null;
+    let resolveOld;
+    const oldResponse = new Promise(resolve => { resolveOld = resolve; });
+    const calls = [];
+    const displayed = [];
+    const captcha = vtoken => ({ vtoken, cookie: "route=test", imageUrl: "data:image/png;base64,dGVzdA==" });
+    loadCaptchaImage = async source => { displayed.push(source); };
+    requestJson = async url => {
+      calls.push(url);
+      if (url.startsWith("/api/captcha?backend=primary")) return oldResponse;
+      if (url === "/api/backend/select") {
+        if (!authenticated) throw new ApiError("请先完成 WebVPN 统一认证", { code: "WEBVPN_AUTH_REQUIRED" });
+        return { preference: "webvpn", webvpn_authenticated: true };
+      }
+      assert.ok(url.startsWith("/api/captcha?backend=webvpn"));
+      return captcha("new-webvpn-captcha");
+    };
+    const loading = loadCaptcha();
+    const selecting = selectBackend("webvpn");
+    assert.equal(loginState.captcha, null);
+    assert.equal(loginElements.submit.disabled, true);
+    resolveOld(captcha("old-primary-captcha"));
+    await Promise.all([loading, selecting]);
+    assert.equal(calls[1], "/api/backend/select");
+    assert.equal(loginState.selectingBackend, false);
+    if (authenticated) {
+      assert.equal(loginState.captcha.vtoken, "new-webvpn-captcha");
+      assert.equal(loginState.captchaStatus, "ready");
+      assert.equal(displayed.length, 1);
+    } else {
+      assert.equal(loginState.captcha, null);
+      assert.equal(loginState.captchaStatus, "webvpn-auth-required");
+      assert.equal(loginElements.webvpnAuthButton.hidden, false);
+      assert.equal(loginElements.captchaWebvpnAuth.hidden, false);
+      assert.equal(displayed.length, 0);
+    }
+  }
+})()
+`, context).catch(error => { console.error(error); process.exitCode = 1; });
+""",
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        cwd=ROOT,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

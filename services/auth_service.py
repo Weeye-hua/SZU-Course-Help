@@ -33,6 +33,7 @@ _automatic_relogin_worker_lock = threading.Lock()
 _automatic_relogin_worker: threading.Thread | None = None
 _session_generation = 0
 _account_generation = 0
+_manual_login_count = 0
 _relogin_state: dict[str, str | int | float] = {
     "status": "idle",
     "message": "",
@@ -275,8 +276,10 @@ def clear_login_state() -> None:
         config.combined_cookie = ""
         config.webvpn_cookie = ""
         config.authserver_cookie = ""
-        config.backend_preference = config.BACKEND_AUTO
-        config.active_backend = config.BACKEND_PRIMARY
+        config.backend_preference = (
+            config.BACKEND_PRIMARY if is_graduate() else config.DEFAULT_BACKEND
+        )
+        config.active_backend = config.backend_preference
         config.token = ""
         config.student_id = ""
         config.password = ""
@@ -311,10 +314,39 @@ def clear_elective_batch() -> None:
             graduate_service.clear_window()
 
 
+class BackendSelectionConflictError(RuntimeError):
+    """An existing or pending login owns the selected school endpoint."""
+
+
 def update_backend_preference(preference: str) -> str:
-    """Set the process-local preferred school backend."""
+    """Keep the endpoint fixed until the user explicitly clears the session."""
     with _state_lock:
-        return backend_service.set_preference(preference)
+        normalized = backend_service.normalize_preference(preference)
+        owns_session = bool(
+            (config.token and config.combined_cookie)
+            or (config.student_id and config.password)
+            or _manual_login_count
+            or _relogin_state["status"] == "running"
+        )
+        if normalized != backend_service.get_preference() and owns_session:
+            raise BackendSelectionConflictError(
+                "当前登录或会话恢复已绑定访问入口，请先停止任务并退出登录，再切换主站或 WebVPN"
+            )
+        return backend_service.set_preference(normalized)
+
+
+@contextmanager
+def manual_login_backend(preference: str):
+    """Pin the endpoint while a manual login awaits the school's response."""
+    global _manual_login_count
+    with _state_lock:
+        update_backend_preference(preference)
+        _manual_login_count += 1
+    try:
+        yield
+    finally:
+        with _state_lock:
+            _manual_login_count -= 1
 
 
 def get_session_snapshot() -> dict[str, str | bool | int]:
@@ -433,12 +465,12 @@ def attempt_ocr_relogin(
 ) -> tuple[str, str, str, str]:
     """Solve a fresh captcha using one explicit login-page credential context."""
     with _state_lock:
+        if backend is not None:
+            update_backend_preference(backend)
         if student_id is not None:
             _bind_student_id_locked(str(student_id).strip())
         if password is not None:
             config.password = str(password)
-        if backend is not None:
-            config.backend_preference = backend_service.set_preference(backend)
         if not config.student_id or not config.password:
             raise RuntimeError("没有可用于自动重登录的内存凭据")
     return logic.verify_vcode_login_flow(max_attempts=max_attempts)
@@ -459,6 +491,11 @@ def attempt_automatic_relogin(
             _account_generation,
         ):
             return False, "登录账号已变化，已取消本次自动恢复"
+        if backend is not None:
+            try:
+                update_backend_preference(backend)
+            except BackendSelectionConflictError as exc:
+                return False, str(exc)
         if student_id is not None:
             normalized_student_id = str(student_id).strip()
             if not re.fullmatch(r"\d{6,12}", normalized_student_id):
@@ -469,11 +506,6 @@ def attempt_automatic_relogin(
             if not normalized_password.strip() or len(normalized_password) > 256:
                 return False, "浏览器会话中的自动登录凭据无效"
             config.password = normalized_password
-        if backend is not None:
-            try:
-                config.backend_preference = backend_service.set_preference(backend)
-            except (KeyError, ValueError):
-                return False, "浏览器会话中的访问后端无效"
         observed_generation = _session_generation
 
     with session_manager.recovery_guard():
@@ -595,6 +627,11 @@ def start_automatic_relogin(
     global _automatic_relogin_worker
     with _automatic_relogin_worker_lock:
         with _state_lock:
+            if backend is not None:
+                try:
+                    update_backend_preference(backend)
+                except BackendSelectionConflictError as exc:
+                    return False, str(exc)
             if config.token and config.combined_cookie:
                 return True, "学校会话已经有效"
             if student_id is not None or password is not None:
@@ -608,13 +645,12 @@ def start_automatic_relogin(
                     return False, "浏览器会话中的自动登录凭据无效"
                 _bind_student_id_locked(normalized_student_id)
                 config.password = normalized_password
-                if backend is not None:
-                    config.backend_preference = backend_service.set_preference(backend)
-                    if (
-                        config.backend_preference == config.BACKEND_WEBVPN
-                        and not backend_service.has_webvpn_cookies()
-                    ):
-                        return False, "请先完成 WebVPN 统一认证"
+                if (
+                    backend is not None
+                    and config.backend_preference == config.BACKEND_WEBVPN
+                    and not backend_service.has_webvpn_cookies()
+                ):
+                    return False, "请先完成 WebVPN 统一认证"
             if not config.student_id or not config.password:
                 return False, "没有可用于自动重登录的内存凭据"
             blocked_reason = _relogin_block_reason_locked()

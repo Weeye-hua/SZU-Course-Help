@@ -47,12 +47,14 @@ from services import (
 )
 from services.auth_service import (
     LOGIN_ERROR_MSG,
+    BackendSelectionConflictError,
     attempt_automatic_relogin,
     automatic_relogin_available,
     clear_elective_batch,
     clear_login_state,
     encrypt_password,
     get_session_snapshot,
+    manual_login_backend,
     perform_school_login,
     refresh_elective_batch,
     save_login_state,
@@ -108,7 +110,7 @@ from study_program import is_graduate, program_payload
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
 RUNTIME_PORT_ENV = "COURSE_SELECT_RUNTIME_PORT"
-UI_ASSET_BUILD = "20260924.3"
+UI_ASSET_BUILD = "20261016.1"
 logger = logging.getLogger(__name__)
 OFFICIAL_SCHOOL_HOME_URL = program_payload()["school_url"]
 
@@ -230,7 +232,10 @@ class LoginRequest(BaseModel):
         max_length=4,
     )
     cookie: str = Field(min_length=1, max_length=8192)
-    backend: str = Field(default=config.BACKEND_AUTO, pattern=r"^(auto|primary|webvpn)$")
+    backend: str = Field(
+        default_factory=lambda: config.BACKEND_PRIMARY if is_graduate() else config.DEFAULT_BACKEND,
+        pattern=r"^(auto|primary|webvpn)$",
+    )
 
 
 class BackendSelectRequest(BaseModel):
@@ -567,7 +572,7 @@ async def api_bootstrap():
 
 @app.post("/api/backend/select")
 async def api_select_backend(req: BackendSelectRequest):
-    """Select the login/read preference; enrollment writes stay on primary."""
+    """Select the school backend for authentication, queries, and enrollment."""
     if is_graduate():
         if req.backend == config.BACKEND_WEBVPN:
             return _api_error(
@@ -577,7 +582,10 @@ async def api_select_backend(req: BackendSelectRequest):
                 retryable=False,
             )
         return JSONResponse(content=backend_service.backend_payload())
-    preference = update_backend_preference(req.backend)
+    try:
+        preference = update_backend_preference(req.backend)
+    except BackendSelectionConflictError as exc:
+        return _api_error(409, str(exc), "BACKEND_SESSION_ACTIVE", retryable=False)
     payload = backend_service.backend_payload()
     if preference == config.BACKEND_WEBVPN and not payload["webvpn_authenticated"]:
         return _api_error(
@@ -625,6 +633,17 @@ async def api_webvpn_auth_status():
 
 @app.post("/api/login", status_code=status.HTTP_200_OK)
 async def api_login(user: LoginRequest):
+    """Keep another login tab from changing the endpoint during school login."""
+    if is_graduate():
+        return await _login_on_selected_backend(user)
+    try:
+        with manual_login_backend(user.backend):
+            return await _login_on_selected_backend(user)
+    except BackendSelectionConflictError as exc:
+        return _api_error(409, str(exc), "BACKEND_SESSION_ACTIVE", retryable=False)
+
+
+async def _login_on_selected_backend(user: LoginRequest):
     """Verify the local card key, then establish a school session."""
     try:
         if is_enroll_task_running() and config.student_id != user.student_id.strip():
@@ -635,8 +654,6 @@ async def api_login(user: LoginRequest):
             return _api_error(
                 400, "研究生模式不支持本科生 WebVPN", "UNSUPPORTED_BACKEND", retryable=False
             )
-        if not is_graduate():
-            update_backend_preference(user.backend)
         if user.backend == config.BACKEND_WEBVPN and not backend_service.has_webvpn_cookies():
             return _api_error(
                 409,
@@ -723,6 +740,13 @@ async def api_login(user: LoginRequest):
             logger.warning("Login succeeded but batch refresh failed: %s", exc)
             message = "登录成功，选课批次暂未读取到，请稍后刷新"
         return ApiMessage(message=message, is_error=False)
+    except backend_service.WebVPNAuthenticationRequiredError:
+        return _api_error(
+            409,
+            "WebVPN 未认证或认证已过期，请先完成统一认证后重试",
+            "WEBVPN_AUTH_REQUIRED",
+            retryable=True,
+        )
     except Exception as exc:
         logger.exception("Unexpected login failure: %s", exc)
         return JSONResponse(
@@ -741,6 +765,8 @@ async def api_captcha(backend: str | None = Query(default=None)):
         # requests from accumulating after a browser timeout.
         result = await asyncio.to_thread(logic.fetch_vtoken_and_image, 1)
         return JSONResponse(content=result, headers=get_no_cache_headers())
+    except BackendSelectionConflictError as exc:
+        return _api_error(409, str(exc), "BACKEND_SESSION_ACTIVE", retryable=False)
     except logic.CaptchaUnavailableError:
         logger.info("School captcha is unavailable in the current window")
         return _api_error(
@@ -2372,8 +2398,9 @@ def _safe_static_file(relative_path: str) -> Path | None:
 @app.post("/api/school/open")
 async def api_open_official_school_page():
     """Open the public school entry without exposing local session secrets."""
+    school_url = program_payload()["school_url"]
     try:
-        opened = await asyncio.to_thread(open_external_url, OFFICIAL_SCHOOL_HOME_URL)
+        opened = await asyncio.to_thread(open_external_url, school_url)
     except Exception as exc:
         logger.warning("Unable to open official school page: %s", exc)
         opened = False
@@ -2383,13 +2410,13 @@ async def api_open_official_school_page():
             "外部打开命令未能执行，请手动访问深圳大学本科选课系统",
             "BROWSER_OPEN_FAILED",
             retryable=True,
-            url=OFFICIAL_SCHOOL_HOME_URL,
+            url=school_url,
         )
     return JSONResponse(
         content={
             "message": "已请求系统浏览器打开学校官方选课页面",
             "is_error": False,
-            "url": OFFICIAL_SCHOOL_HOME_URL,
+            "url": school_url,
         },
         headers=get_no_cache_headers(),
     )

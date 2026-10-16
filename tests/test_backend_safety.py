@@ -132,10 +132,20 @@ def test_enrollment_stays_on_primary_after_read_only_webvpn_fallback(monkeypatch
     assert "_webvpn_key" not in calls[0]["headers"]["Cookie"]
 
 
-def test_school_login_stays_on_primary_and_excludes_webvpn_cookie(monkeypatch):
+@pytest.mark.parametrize(
+    ("preference", "expected_backend"),
+    [
+        (config.BACKEND_AUTO, config.BACKEND_PRIMARY),
+        (config.BACKEND_PRIMARY, config.BACKEND_PRIMARY),
+        (config.BACKEND_WEBVPN, config.BACKEND_WEBVPN),
+    ],
+)
+def test_school_login_uses_explicit_preference_not_last_query_backend(
+    monkeypatch, preference, expected_backend
+):
     _authenticate_webvpn(monkeypatch)
     monkeypatch.setattr(config, "active_backend", config.BACKEND_WEBVPN)
-    monkeypatch.setattr(config, "backend_preference", config.BACKEND_WEBVPN)
+    monkeypatch.setattr(config, "backend_preference", preference)
     captured = {}
 
     class Response:
@@ -154,7 +164,8 @@ def test_school_login_stays_on_primary_and_excludes_webvpn_cookie(monkeypatch):
     result = logic.login("2024110122", "vtoken", "encrypted", "1-2,3-4,5-6,7-8", "route=captcha")
 
     assert result["success"] is False
-    assert captured["preference"] == config.BACKEND_PRIMARY
+    assert captured["preference"] == expected_backend
+    # The request layer adds gateway cookies only for a WebVPN destination.
     assert "_webvpn_key" not in captured["cookie"]
 
 
@@ -556,8 +567,10 @@ def test_captcha_round_keeps_backend_when_global_preference_changes(monkeypatch)
 
 
 @pytest.mark.parametrize("flow", [logic.verify_vcode, logic.verify_vcode_login_flow])
-def test_automatic_ocr_stays_on_primary_even_when_manual_preference_is_webvpn(monkeypatch, flow):
-    monkeypatch.setattr(config, "backend_preference", "webvpn")
+@pytest.mark.parametrize("preference", ["primary", "auto", "webvpn"])
+def test_automatic_ocr_uses_the_selected_session_endpoint(monkeypatch, flow, preference):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "backend_preference", preference)
     monkeypatch.setattr(config, "student_id", "2024000000")
     monkeypatch.setattr(config, "password", "offline-only")
     calls = []
@@ -588,6 +601,14 @@ def test_automatic_ocr_stays_on_primary_even_when_manual_preference_is_webvpn(mo
     )
     assert flow(max_attempts=1)[0] == "vtoken"
     assert len(calls) == 2
-    assert all("http://bkxk.szu.edu.cn/" in call["url"] for call in calls)
-    assert all("Cookie" not in call["headers"] for call in calls)
-    assert config.backend_preference == "webvpn"
+    expected_origin = (
+        "https://bkxk.webvpn.szu.edu.cn/" if preference == "webvpn" else "http://bkxk.szu.edu.cn/"
+    )
+    assert all(call["url"].startswith(expected_origin) for call in calls)
+    for call in calls:
+        if preference == "webvpn":
+            assert call["headers"]["Cookie"] == config.webvpn_cookie
+            assert call["allow_redirects"] is False
+        else:
+            assert "Cookie" not in call["headers"]
+    assert config.backend_preference == preference

@@ -136,9 +136,10 @@ def verify_vcode(
     cookie = ""
     last_error: Exception | None = None
     structural_failures = 0
+    preference = backend_service.session_profile().key
     for attempt in range(1, max_attempts + 1):
         try:
-            vtoken, cookie = get_new_image(preference=config.BACKEND_PRIMARY)
+            vtoken, cookie = get_new_image(preference=preference)
             # The school returned one complete captcha response. OCR failures
             # after this point are a separate category and break the streak.
             structural_failures = 0
@@ -204,11 +205,11 @@ def verify_vcode_login_flow(
 
     last_error: Exception | None = None
     structural_failures = 0
+    preference = backend_service.session_profile().key
     for attempt in range(1, max_attempts + 1):
         try:
-            # Automatic recovery retains the primary-only login contract;
-            # the optional manual captcha route must not change this flow.
-            captcha = fetch_vtoken_and_image(1, preference=config.BACKEND_PRIMARY)
+            # Keep recovery on the same endpoint as the selected login session.
+            captcha = fetch_vtoken_and_image(1, preference=preference)
             # A valid token/image/cookie tuple ends any preceding school
             # response-contract streak, even when OCR cannot solve the image.
             structural_failures = 0
@@ -394,7 +395,7 @@ def fetch_undergraduate_start_time(batch_code: str, token: str, combined_cookie:
         "POST",
         f"elective/batch.do?timestamp={int(time.time() * 1000)}",
         read_only=True,
-        preference=config.BACKEND_PRIMARY,
+        preference=backend_service.session_profile().key,
         timeout=REQUEST_TIMEOUT,
         token=token,
         cookie=combined_cookie,
@@ -462,14 +463,15 @@ def login(
         "verifyCode": coordinate_string,
     }
 
-    # Authentication is state-changing and must never inherit a previous
-    # read-only WebVPN fallback. The gateway remains query-only by design.
+    # Pin authentication to the selected endpoint, independent of any previous
+    # read-only fallback. Captcha requests use this same profile.
     #
     # The login POST submits only the cookie issued by this captcha round —
     # the browser contract (captcha Set-Cookie -> login request). Concatenating
     # the stale runtime session resubmits expired route/JSESSIONID values with
     # duplicate cookie names, whose ordering the school resolves
     # unpredictably (issue #9).
+    profile = backend_service.session_profile()
     response = _school_request(
         "POST",
         "student/check/login.do",
@@ -478,9 +480,8 @@ def login(
         content_type="application/x-www-form-urlencoded; charset=UTF-8",
         cookie=parsed_cookie or None,
         omit_cookie=not parsed_cookie,
-        preference=config.BACKEND_PRIMARY,
+        preference=profile.key,
     )
-    profile = backend_service.get_profile(config.BACKEND_PRIMARY)
     set_cookie = (
         response.headers.get_list("set-cookie")
         if hasattr(response.headers, "get_list")
